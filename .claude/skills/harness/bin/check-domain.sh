@@ -858,6 +858,18 @@ def domain_check():
               "`git worktree remove` rather than written into.", file=sys.stderr)
         sys.exit(2)
 
+    if _verdict["outcome"] == "wrong_checkout":
+        # Issue #895: the same relative path exists, unrefused, in every checkout of
+        # this repository — main and every worktree — because a domain grant is
+        # matched by SHAPE alone. This target sits in a REAL checkout of the same
+        # repository this session is rooted in, just not the one it is rooted in.
+        print(f"check-domain: BLOCKED — {target} is in {_verdict['checkout']}, but "
+              f"this session is rooted in {_verdict['root']}.", file=sys.stderr)
+        print(f"  Write it there instead: a domain grant is matched by relative path "
+              f"shape, and the identical path in a different checkout of this "
+              f"repository is not the same file.", file=sys.stderr)
+        sys.exit(2)
+
     if _verdict["outcome"] == "not_a_domain_question":
         # bash-write-guard.sh already said so ("outside repo — not this hook's
         # problem"), and this hook did not: a scratch script at /tmp/x.py was legal via
@@ -1074,6 +1086,12 @@ VERB = "OVER BUDGET (already written)" if _post else "BLOCKED"
 # guard would create exactly the silent drift `test-check-state.py` case (o) exists to catch.
 _I = re.IGNORECASE
 RE_FEATURE_JSON = re.compile(r"^\.harness/[^/]+/features/[^/]+/feature\.json$", _I)
+# NOT imported from harness_boundary.RE_STATE_YAML (issue #1106), even though the pattern
+# text is identical there for bash-write-guard.sh's use: the shape phase's import of
+# harness_boundary must stay ABSORBING (comment above, near the top of this file) — a
+# fail-closed import here would block the MAIN SESSION, the only tier that can repair a
+# broken harness_boundary.py. test-check-domain.py asserts the two pattern strings match
+# byte-for-byte so this respelling cannot silently drift.
 RE_STATE_YAML   = re.compile(r"^\.harness/[^/]+/features/[^/]+/runs/[^/]+/state\.yaml$", _I)
 RE_HANDOFF      = re.compile(r"^\.harness/[^/]+/features/[^/]+/notes/handoff-[a-z0-9-]+\.md$",
                              _I)
@@ -1081,6 +1099,7 @@ RE_STATE_MD     = re.compile(r"^\.harness/[^/]+/features/[^/]+/STATE\.md$", _I)
 # CLAUDE.md (issue #139). Not a state file, and included here anyway because this is
 # where the four-route machinery already lives — the alternative was a fifth gate.
 RE_CLAUDE_MD    = re.compile(r"^CLAUDE\.md$", _I)
+# Same non-import rationale as RE_STATE_YAML above.
 RE_RUN_DIGEST   = re.compile(r"^\.harness/[^/]+/features/[^/]+/runs/[^/]+/digest\.md$", _I)
 RE_PLAN_YAML    = re.compile(r"^\.harness/[^/]+/features/[^/]+/plan\.yaml$", _I)
 # RE_RUN_DIGEST is deliberately absent from SHAPE_PATTERNS and the post-hoc sweep globs (FEAT-50).
@@ -1414,6 +1433,7 @@ def shape_problems(rel, content, display=None, absolute_path=None):
             out.append(f"  duplicate key {e.key!r} — the second silently shadows the first; "
                        f"replace the placeholder, never append a copy (DEC-156).")
             return out
+
         except harness_yaml.YamlParseError as e:
             # NEW blocking outcome, deliberate (D-02 consequence #2). The regex this
             # replaced found no keys in a malformed file and therefore reported nothing
@@ -1423,6 +1443,83 @@ def shape_problems(rel, content, display=None, absolute_path=None):
             out.append("  A checkpoint that cannot be parsed is unreadable to every gate that "
                        "consumes it later; the write is refused while you can still fix it.")
             return out
+
+        # Issue #1124: the digest guard above (#1058) fires only on digest.md, but a run
+        # directory's state.yaml is written just as easily under a reused slug — and unlike
+        # digest.md, state.yaml is LEGITIMATELY rewritten many times over a run's life
+        # (DEC-154's "checkpoint, not a notebook" upsert). A prefix/equality compare like the
+        # digest guard's would refuse every legitimate checkpoint update, so this checks
+        # identity instead of content: run_id is the one field every checkpoint in this run
+        # carries unchanged from its first write (CHECKPOINT_KEYS in check-state.sh), so a
+        # PRIOR file whose run_id disagrees with THIS write's run_id is not an upsert of this
+        # run at all — it is a different run's checkpoint about to be silently destroyed.
+        if absolute_path is not None:
+            prior_state = None
+            prior_unreadable = False
+            try:
+                with open(absolute_path, encoding="utf-8", errors="replace") as prior_file:
+                    prior_state = prior_file.read()
+            except FileNotFoundError:
+                if not os.path.lexists(absolute_path):
+                    prior_state = ""
+                else:
+                    prior_unreadable = True
+            except OSError:
+                # FAIL CLOSED, matching the sibling #1058 digest guard directly above: a
+                # prior file that lexists but cannot be opened (permission denied, is a
+                # directory, a transient I/O error) is not the same as no prior file — and
+                # treating it as "nothing to compare" would let the exact silent-overwrite
+                # this guard exists to catch straight through under an unreadable prior.
+                prior_unreadable = True
+            if prior_unreadable:
+                out.append(_head("run state already exists but cannot be read safely; "
+                                 "refusing a Write that could destroy its recorded content."))
+                return out
+            if prior_state:
+                # Issue #1106, gap (b): a prior that exists but will not parse, or that
+                # parses but carries no run_id, used to fall through to `prior_doc = None` /
+                # `isinstance(..., dict)` failing silently — the exact silent-overwrite this
+                # guard exists to catch, just reached by a malformed or identity-less prior
+                # instead of an unreadable one. FAIL CLOSED on all three: unparseable prior,
+                # prior missing run_id, incoming missing run_id while a prior exists. None of
+                # these can be shown to be a legitimate upsert of THIS run, and "cannot
+                # verify" is not "allow" for an artifact this guard exists to protect.
+                try:
+                    prior_doc = harness_yaml.load_str(prior_state, rel)
+                except Exception as prior_exc:
+                    out.append(_head("run state already exists but does not parse; "
+                                     "refusing a Write that could silently replace it."))
+                    out.append(f"  {prior_exc}")
+                    return out
+                if not isinstance(prior_doc, dict):
+                    out.append(_head("run state already exists but is not a mapping after "
+                                     "parsing; refusing a Write that could silently replace "
+                                     "it."))
+                    return out
+                prior_run_id = prior_doc.get("run_id")
+                new_run_id = doc.get("run_id") if isinstance(doc, dict) else None
+                if prior_run_id is None:
+                    out.append(_head("state.yaml run identity (Issue #1106)."))
+                    out.append("  this run directory already holds a checkpoint with no "
+                               "run_id — its identity cannot be verified, so a Write that "
+                               "could silently replace it is refused. Write this cycle's "
+                               "state into a run directory of its own.")
+                    return out
+                if new_run_id is None:
+                    out.append(_head("state.yaml run identity (Issue #1106)."))
+                    out.append(f"  this run directory already holds a checkpoint for run_id "
+                               f"{prior_run_id!r}; this Write carries no run_id of its own, "
+                               f"so it cannot be shown to be an upsert of that run. Write "
+                               f"this cycle's state into a run directory of its own.")
+                    return out
+                if str(prior_run_id) != str(new_run_id):
+                    out.append(_head("state.yaml run identity (Issue #1124)."))
+                    out.append(f"  this run directory already holds a checkpoint for "
+                               f"run_id {prior_run_id!r}; this Write carries run_id "
+                               f"{new_run_id!r} — a different run's state, not an upsert "
+                               f"of this one. Write this cycle's state into a run "
+                               f"directory of its own.")
+                    return out
 
         # T-17 / D-08: str() BOTH sides. A parsed key is not necessarily a string —
         # YAML 1.1 resolves `on:`, `off:`, `yes:`, `no:` to booleans and `01:` to an int —
@@ -1671,11 +1768,76 @@ if not _post and _tool in ("Write", "Edit", "NotebookEdit") and _reached_plan:
         f"set-task-station --file <plan.yaml> --task T-NN --station <station>\n"
         f"  Record the feature's station: python3 .claude/skills/harness/bin/{_writer} "
         f"set-feature-station --file <plan.yaml> --station <station>\n"
+        f"  Record a plan-panel cycle:    python3 .claude/skills/harness/bin/{_writer} "
+        f"set-panel --file <plan.yaml> --value-file <panel.yaml>\n"
         f"  Add tasks:                    python3 .claude/skills/harness/bin/{_writer} "
         f"add-tasks --file <plan.yaml> --proposal <path>\n"
         f"  Apply a proposal:             python3 .claude/skills/harness/bin/{_writer} "
         f"apply --file <plan.yaml> --proposal <path>\n")
     sys.exit(2)
+
+# FEAT-51: a Claude Code child whose parent is gone may finish analysis, but it may
+# not race a replacement writer onto a canonical feature artifact. The explicit
+# quarantine path is inert until the resumed parent adopts it.
+if (_governed and not _post and _tool in ("Write", "Edit", "NotebookEdit")
+        and target):
+    _orphan_rel = _norm(target)
+    _orphan_basename = os.path.basename(_orphan_rel)
+    if _orphan_basename in ("plan.yaml", "BRIEF.md", "feature.json", "STATE.md"):
+        try:
+            import inflight_registry as _reg
+            _artifact = _reg.canonical_artifact(_orphan_rel)
+            if _artifact is not None:
+                _feature, _basename = _artifact
+                _session = d.get("session_id")
+                if _reg.orphan_write(root, agent, _feature, _session):
+                    _quarantine = _reg.quarantine_rel(
+                        _orphan_rel, agent, _session
+                    )
+                    sys.stderr.write(
+                        f"check-domain: BLOCKED — {_show(target)} is canonical, but "
+                        f"{agent} holds no live claim for {_feature}. Its parent is gone "
+                        f"and a replacement may already be writing.\n"
+                        f"  Write the completed result to {_quarantine} instead.\n"
+                        f"  It becomes canonical only when the resumed parent runs "
+                        f"quarantine.py adopt on that file.\n"
+                    )
+                    sys.exit(2)
+        except Exception as _e:
+            print(
+                f"check-domain: quarantine boundary was not enforced ({_e!r}) — "
+                "passing through.",
+                file=sys.stderr,
+            )
+
+def _edit_reconstructed_content(absolute_path, old_string, new_string, replace_all):
+    """Issue #1106, gap (a). The full file content Claude's Edit tool would produce, or
+    None when the edit itself is ambiguous or a no-op — in which case it is not this
+    gate's problem: the tool's own match-uniqueness requirement (never this hook) is what
+    refuses an old_string that is absent or, without `replace_all`, non-unique.
+
+    THIS IS NOT A NAIVE READ OF THE PAYLOAD. FEAT-50's brief argued Edit "carries no
+    complete incoming payload to compare" and left the route unguarded on that basis. That
+    is true only of `tool_input` alone — both `_field_lines`-adjacent guards below already
+    read the on-disk PRIOR file for their own comparison, and `old_string`/`new_string`
+    applied against that same prior reconstructs the exact resulting bytes whenever the
+    match is unambiguous, the same technique `approval_guard` above already uses for its
+    own Edit branch (byte-range overlap, not a blanket route denial).
+    """
+    if not isinstance(old_string, str) or not old_string or not isinstance(new_string, str):
+        return None
+    try:
+        with open(absolute_path, encoding="utf-8", errors="replace") as _f:
+            disk = _f.read()
+    except OSError:
+        return None
+    count = disk.count(old_string)
+    if count == 0 or (count > 1 and not replace_all):
+        return None
+    if replace_all:
+        return disk.replace(old_string, new_string)
+    return disk.replace(old_string, new_string, 1)
+
 
 if not _post:
     # PRE. Only `Write` carries a whole-file `content` to measure, so only `Write` can be
@@ -1683,10 +1845,27 @@ if not _post:
     # re-parsing here was leftover from the four-launch version — and inconsistent
     # leftover: this copy exited 0 on a failure the first one absorbed with `d = {}`, so
     # the two disagreed about what a bad payload means. Review finding 2.
-    if _tool != "Write" or not target:
+    #
+    # ISSUE #1106, GAP (a): an Edit targeting a run's digest.md or state.yaml is NARROWLY
+    # widened into this route — narrowly, because shape_problems() also carries budget and
+    # vocabulary rules (feature.json, CLAUDE.md, handoff, plan.yaml) this fix does not
+    # touch; widening the whole PRE route to Edit would pull those in too, unreviewed. The
+    # reconstructed content feeds the SAME shape_problems() the Write route already uses,
+    # so the digest prefix test and the state.yaml identity test apply unchanged.
+    if (_tool == "Edit" and target
+            and (RE_RUN_DIGEST.match(_norm(target)) or RE_STATE_YAML.match(_norm(target)))):
+        _ti = d.get("tool_input") or {}
+        _content = _edit_reconstructed_content(
+            os.path.abspath(target), _ti.get("old_string"), _ti.get("new_string"),
+            bool(_ti.get("replace_all")))
+        if _content is None:
+            sys.exit(0)
+        targets = [(_norm(target), _content, _show(target), os.path.abspath(target))]
+    elif _tool != "Write" or not target:
         sys.exit(0)
-    targets = [(_norm(target), (d.get("tool_input") or {}).get("content") or "",
-                _show(target), os.path.abspath(target))]
+    else:
+        targets = [(_norm(target), (d.get("tool_input") or {}).get("content") or "",
+                    _show(target), os.path.abspath(target))]
 
 elif target:
     # POST, with a named file: Write, Edit, NotebookEdit. Read what LANDED — no

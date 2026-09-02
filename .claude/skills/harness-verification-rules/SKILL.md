@@ -1,6 +1,6 @@
 ---
 name: harness-verification-rules
-description: Verification discipline for QA — enforce the test matrix against the diff, resolve each test kind to one of four states, audit test-first compliance, and supply the evidence the goal-check consumes. Loaded by harness-qa.
+description: Verification discipline for QA — enforce the test matrix against the diff, resolve each test kind to one of five states, audit test-first compliance, and supply the evidence the goal-check consumes. Loaded by harness-qa.
 user-invocable: false
 ---
 
@@ -33,7 +33,11 @@ You may **add** a requirement the diff clearly warrants. You may never drop belo
 **Presence is not satisfied by an unrelated existing test.** A new endpoint is not covered because a
 different endpoint has one. Find the test exercising *this* change, or the kind is missing.
 
-## Resolve each kind to exactly one of four states
+**A `config` task that changes a value's shape** (a key's container type, required-ness, or
+structural nesting in a config a gate script reads) **trips `touches_config_shape` and requires
+`integration`** (DEC-212) — a value tweak does not.
+
+## Resolve each kind to exactly one of five states
 
 Read **two** signals, never just the exit code: what kind of failure, not merely whether it failed.
 
@@ -42,6 +46,7 @@ Read **two** signals, never just the exit code: what kind of failure, not merely
 | **satisfied** | a named test ran, none failed | contributes to `PASS` |
 | **missing** | required, and nothing covers this change | **`FAIL`** |
 | **not applicable** | the tooling genuinely is absent (e.g. `ui` with no Playwright) | **soft skip.** Report it; do not FAIL |
+| **locally-run** | `test_kinds.<kind>.status == "locally_run"` (issue #1187) — a real `cmd` that cannot run in CI (needs a host and live credentials) | **not FAIL, not a soft skip.** If the change touched this kind's `detect` surface, require a recorded run under the feature's `notes/`; absent that note, `BLOCKED — locally-run kind '<kind>' has no recorded run` |
 | **misconfigured** | `cmd` is null/absent · no test files matched · the failure is a **load / import / collection / syntax error** rather than an assertion | **`BLOCKED`** — never `FAIL` |
 
 **An absence assertion is never a check on its own (DEC-169).** For every "X is gone" assertion,
@@ -70,6 +75,33 @@ discriminates (mutate, watch it fail, restore) is sanctioned — but the bash-wr
 in-place source edits in the main checkout by design. Run the proof in a disposable worktree
 (`isolation: worktree`, or `git worktree add`); verify the restore with
 `git status --porcelain <path>`, never a read-back.
+
+## Every criterion names its mutant, and its subject (issue #979)
+
+Nine real instances shipped past review because an assertion's subject was not the thing it
+claimed to bind: prose about a mechanism, not the mechanism; a stub, not the collaborator; a
+substring, not the count; a comparison that is false either way, not the operator under test. None
+failed loudly — all read as passing verification while verifying nothing.
+
+**Any criterion claiming to exclude a specific wrong implementation must name the mutant and be
+provable by flipping it.** A signed criterion asserting `>=` where the code only ever exercised
+`>` with a value the comparison is true either way for excludes nothing — measured live: an
+under-threshold test fixture whose value made both `28614 > 200000` and `28614 >= 200000` false,
+so the operator could be swapped and nothing reddened. Before signing off a criterion that names an
+operator, a threshold, or an exclusion, mutate the code to the wrong alternative and confirm the
+named test reddens. This is the single question in this defect class with the most teeth — ask it
+of every new assertion, not only the ones that feel risky.
+
+**Fixture provenance.** A fixture standing in for a nested or externally-produced artifact must
+name what it was captured *from* — depth, shape, or mode. A fixture captured from a main-session
+run is not proof of a nested-subagent path; if the plan or the code needs the nested case, demand a
+fixture that says so, not one that is merely present.
+
+**Measurement mode.** A claim about host or environment behaviour (a resolved package version, a
+binary's location) is only as good as the mode it was measured under — `bun run` and `bun test`
+resolved three different copies of the same package in this project's own history. If a coverage
+gap or an added test depends on measuring the real host, state the mode next to the claim; do not
+accept a claim measured under one execution mode as covering another.
 
 ## You supply the evidence, not the verdict on the goal
 
@@ -111,3 +143,4 @@ either to a qa return is the schema leak SC-05 exists to catch.
 | "The command errors, I'll skip that kind" | That is `BLOCKED`, loudly |
 | "Small change, the matrix is overkill" | The matrix is a floor. Size is not a change type |
 | "There's a test in that file already" | Does it exercise *this* behaviour? If not, missing |
+| "The test passes, so the criterion is proven" | Passing is not exclusion. Name the mutant, flip it, confirm it reddens |

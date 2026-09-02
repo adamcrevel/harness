@@ -5069,9 +5069,9 @@ project-specific `python` kind, and reshaped four change types — and is broken
 therefore never resolve. Ungoverned tailoring is what this entry replaces.
 
 **Applied here: this repository excludes `functional`.** `run-unit-tests.sh` splits its suite on one
-stated principle from issue #160 — does this drive a real script end to end? — into in-process
-`UNIT_SCRIPTS` and forking `INTEGRATION_SCRIPTS`. There is no third bucket, this repository ships no
-service API, and pointing `functional` at either array would double-count files the other kind
+stated principle from issue #160 — does this depend on behaviour observed in another process? —
+between `tests/unit/` and `tests/integration/`. There is no third bucket, this repository ships no
+service API, and pointing `functional` at either directory would double-count files the other kind
 already runs. There is no honest `functional.cmd` here, so the requirement is removed from
 `api.always`, `cross_module.always` and `feature.always`, and the kind is retained with
 `status: excluded`.
@@ -5575,31 +5575,29 @@ harness's own tree and the enforcement-layer carve-out still governs what it may
 where a file matches more than one kind's `detect`, it resolves to the kind whose glob names it
 **explicitly**, never to the kind whose glob is a catch-all.
 
-Concretely: `unit.detect` carries `.claude/skills/harness/bin/test-*.py`, which matches every test
-script in `bin/`, and `integration.detect` is a list of filenames. A file in both is `integration`.
+Concretely: a file under `tests/integration/` whose name also matches unit's catch-all
+`**/*.test.*` pattern is integration, because the explicit directory wins.
 
 **Because:** the rule was already load-bearing and already consistently applied — four files sat in
 both lists and were treated as integration — and it was written nowhere. A convention nobody can
 find is one every reader has to re-derive from the data, and two readers who derive it differently
 will not be caught.
 
-**What this does not do, said plainly rather than discovered later.** Nothing implements it. There is
-no classifier. `test_kinds` is read by `harness-qa` by hand, and `run-unit-tests.sh` reads its own
-`UNIT_SCRIPTS` / `INTEGRATION_SCRIPTS` arrays and never opens `harness.json` at all. So this entry is
-the enforcement until something mechanical exists, and the failure mode it does not close is two
-readers disagreeing about an overlapping file.
+**What this does not do, said plainly rather than discovered later.** The runner reads the
+`tests/unit/` and `tests/integration/` directories. Those directories and this repository's current
+detect globs overlap for no test file, so no mechanical classifier is needed today. This entry
+remains the enforcement for any future overlap.
 
 **What forced it.** Eight of twelve `INTEGRATION_SCRIPTS` entries were absent from
 `integration.detect`, so `run-unit-tests.sh` ran them as integration while the qa matrix read them as
-unit — and every `evidence: integration` claim resting on one of those files was false. The fix is to
-name each file in `integration.detect`, which leaves it matching **both** globs. That fix means
-something only if this precedence is real, so the rule had to stop being folklore before the fix
+unit — and every `evidence: integration` claim resting on one of those files was false. The fix was
+to name each file in `integration.detect`, which left it matching **both** globs. That fix meant
+something only if this precedence was real, so the rule had to stop being folklore before the fix
 could be trusted.
 
-**A cross-check is separate from this rule, deliberately.** The check that the arrays and the
-`detect` lists agree is a set comparison; its correctness does not depend on the answer here, only
-its meaning does. Keeping them apart stops a check from silently encoding a rule the record does not
-state.
+**The former cross-check was separate from this rule, deliberately.** It compared two
+hand-maintained lists. DEC-213 deleted both lists by making the directory the kind; this precedence
+rule stands independently.
 
 **If this is ever implemented, the test must assert on a file matching BOTH globs** and go red when
 the resolution flips. A test over non-overlapping files passes under either rule and proves nothing
@@ -5705,16 +5703,19 @@ exercised, not hypothetical — because a fix that can brick every later dispatc
 is what "on one checkout" means: a shared registry would refuse a second feature's product manager while the first's is
 live.
 
-**Only the dispatch cause of issue #551 is closed.** Its two reporting consequences — a lead emitting a terminal verdict
-about members it cannot see, an orchestrator inferring run verdicts from disk — are NOT closed, and no wait can close
-them: the `SubagentStop` hook passes through on `stop_hook_active` to avoid an infinite stop loop, so a stop refusal
-fires at most once per consecutive stop sequence and re-fires on each later wake while a child is still live. What ships
-is aimed at the false REPORT — a lead or orchestrator returning while a child it dispatched is still claimed is REFUSED
-on that hook once per consecutive stop sequence, the one-correction-round strength every other digest contract in that
-file has, and again on each later wake; the loss itself is prevented at the `PreToolUse` hook, whose refusals have no
-once-only bound. The residual, plainly: a second identical return ships when it is immediate, the refusal re-fires only
-on a later wake while a child is still live, and an orphaned child of an interrupted parent has no parent left to refuse
-it.
+**Issue #551's dispatch cause is closed, and so is the first of its two reporting consequences.** A lead emitting a
+terminal verdict about members it cannot see is closed by DEC-210: a lead or orchestrator whose children are live has a
+legal NONTERMINAL turn-end, `VERDICT: SUSPENDED` carrying an `awaiting` list naming every live child, accepted at exit 0
+inside `validate-digest.py`'s `hook_mode` (`.agents/skills/harness/bin/validate-digest.py:1662`), so no parent is forced
+to grade work it has not seen. The second consequence — an orchestrator inferring run verdicts from disk — is NOT
+closed, and nothing in this file closes it. No wait closes either: the `SubagentStop` hook passes through on
+`stop_hook_active` to avoid an infinite stop loop, so a stop refusal fires at most once per consecutive stop sequence and
+re-fires on each later wake while a child is still live. What ships is aimed at the false REPORT — a lead or
+orchestrator returning a TERMINAL verdict while a child it dispatched is still claimed is REFUSED on that hook once per
+consecutive stop sequence, the one-correction-round strength every other digest contract in that file has, and again on
+each later wake; the loss itself is prevented at the `PreToolUse` hook, whose refusals have no once-only bound. The
+residual, plainly: a second identical return ships when it is immediate, the refusal re-fires only on a later wake while
+a child is still live, and an orphaned child of an interrupted parent has no parent left to refuse it.
 
 **The bound is per consecutive stop sequence, not per run.** The hook keeps no state marking a return already refused —
 `validate-digest.py` returns early on `stop_hook_active` and reads live children fresh, and `live_children` is a read
@@ -5722,7 +5723,9 @@ that only expires stale claims — so a wake that finds a child still live is re
 on the code path the lead tier uses carries two stop refusals naming DIFFERENT child sets, which is a distinct refusal
 event and not replayed context (`agent-a89be3fd837d1b779`). Ending a lead's turn after every dispatch raises the rate of
 stop attempts made with children live, so each attempt risks its own refusal rather than there being one per return.
-`inflight_registry.py`'s refusal message states the same bound.
+`inflight_registry.py`'s refusal message carries no once-only bound; it ends by naming the legal turn-end for a lead or
+orchestrator whose child is live — `VERDICT: SUSPENDED` with an awaiting list naming every live child
+(`.agents/skills/harness/bin/inflight_registry.py:579-582`).
 
 **#551's count is a FLOOR, never a total.** At least eight are measured as of this commit, and the mechanism fired again
 during the build of its own fix: 5 through 8 came from this feature's own runs. The count has already moved four → seven
@@ -6486,3 +6489,200 @@ would still have to parse a presentation-oriented record to recover the result.
 
 **Plan reviews are untouched.** DEC-207's `reviewed: plan:<path>` target has no code diff and no
 pinned `review_sha`, and never invokes the grader.
+
+## DEC-210 — On the Claude Code compatibility host a parent with live children suspends rather than completes, and an orphaned writer is quarantined at two governed write routes rather than killed
+
+**Chose:** A lead or orchestrator return with live children has THREE answers on the compatibility
+host, not two: an accepted nonterminal suspension — `VERDICT: SUSPENDED` carrying an `awaiting` list
+that names every live child — which exits 0; a refused terminal verdict, exit 2, while any child is
+still live; and the unchanged validation path when no child is live
+(`.claude/skills/harness/bin/validate-digest.py`, `hook_mode`). `SUSPENDED` is recognised ONLY inside
+`hook_mode` and is NOT a member of `VERDICTS`, so no member persona and no written digest can carry
+it. Origin: `FEAT-51-claude-code-lifecycle-safety`.
+
+**A suspension is not a completion: the suspending parent's claim is NOT released.** The accepted
+suspension returns ahead of the release step, so the parent still owns its claim while its children
+run. Every terminal or invalid return releases first, exactly as before.
+
+**Quarantine is a WRITE boundary, not a kill.** A governed writer holding no live claim for the
+feature it is writing, while some other live claim for that feature exists, is refused and told the
+exact quarantine path to write instead. An orphan may still finish its work: reads, greps, and writes
+to `notes/`, `observations/` and `runs/` are untouched, because the refusal keys on the four
+canonical artifact paths alone.
+
+**The four canonical artifacts are `plan.yaml`, `BRIEF.md`, `feature.json` and `STATE.md`, and the
+boundary is enforced at TWO registered gates.** `check-domain.sh`, on PreToolUse for Write and Edit,
+bites on `BRIEF.md`, `feature.json` and `STATE.md`. `plan-sign-gate.sh`, on PreToolUse for Bash,
+bites on the four mutating `plan-merge.py` verbs — `apply`, `add-tasks`, `set-task-station` and
+`set-feature-station` — and on `quarantine.py adopt`. Two gates because the two write routes are
+disjoint and neither can see the other's traffic. All three scripts sit in the enforcement layer
+DEC-174 keeps out of self-hosted execution, so each is verified by its own explicit test script
+rather than by the gates under change.
+
+**`plan.yaml` is covered by the `plan-sign-gate.sh` half, and NOT by FEAT-41's editor-route
+denial.** Its only write route is `plan-merge.py` invoked through Bash. That denial — exit 2 on an
+editor write of any `plan.yaml`, for every author, under DEC-182's reversal — is a second and
+independent refusal on a route nobody may use; the `check-domain.sh` quarantine branch sits AFTER it
+and defers to it, so the more fundamental refusal keeps its message.
+
+**What the boundary does NOT cover, stated as plainly as what it does.** `quarantine.py discard` is
+deliberately uncovered, so nothing here proves that an orphan cannot destroy a quarantined result: a
+rule on that verb, while a plain `rm -rf` of the same directory stays legal under the shared sandbox
+glob, would record a protection the tree does not have. And the boundary bounds those two GOVERNED
+routes alone — a generic Bash write (`cp`, `cat`, `tee`, `mv`, `sed -i`, `python3 -c`) to a canonical
+artifact INSIDE the writer's own domain reaches neither gate and is not refused, because
+`bash-write-guard.sh` passes an in-domain write and `check-domain.sh` is registered for Write and
+Edit only. That was measured: exit 0 on all three gates. Generic write-route enforcement needs a
+generic write-route gate, which is a different feature and goes to the backlog rather than being
+built here.
+
+**Adoption and discard are the only two explicit acts.** A quarantined result becomes canonical only
+when a resumed parent runs `quarantine.py adopt`; `discard` is the other explicit act. Neither is a
+default and neither is a timeout — quarantined content is inert until a parent acts on it. Adoption
+of `plan.yaml` goes through the locked union merge DEC-199 put behind `plan-merge.py`.
+
+**The quarantine sandbox is ONE shared glob**, `.harness/*/features/*/quarantine/**` in
+`team-config.yaml`'s `shared:` list, rather than twelve per-persona domain grants. One glob is what
+makes every persona's own quarantine directory writable without a grant of its own, and it is also
+why the `discard` gap above cannot be closed by a CLI rule.
+
+**OMP behaviour is unchanged.** The boundary fires only where a live claim for the feature has a
+runtime that is not `omp`; blocking nested edges, process-owned liveness and every OMP-path
+assertion in DEC-204 continue to hold. This entry supersedes nothing in DEC-204 and narrows nothing
+in DEC-201.
+
+**The honest bound.** Claude Code exposes no durable child-process owner, so beyond
+`CLAIM_TTL_SECONDS` — 1200 seconds, one normal PM cycle — a suspended parent cannot be distinguished
+from an interrupted one, and the boundary fails safe by treating the parent as gone. A member running
+longer than that TTL therefore meets the quarantine path on a NORMAL run. That is a cost of the
+compatibility host and does not exist on OMP, where a claim is owned by a supervisor process and a
+verified one is live at any age.
+
+## DEC-211 — The suite runs in parallel, and no test mutates state another test can see
+
+**The shared checkout is never a test fixture.** `test-check-domain.py` previously overwrote the
+live `feature_schema.py` for about a 90ms window per run. In measurement, 5,105 of 1,032,849 polls
+observed the broken module. The crashing-checker probe now receives a private copy of the complete
+bin directory through `isolated_bin.py`; shortening or retrying the window is not a fix. Absence of
+the hazard is the proof: while the defect was fully present it nevertheless went quiet for six
+consecutive eight-worker runs.
+
+**The repair scope is derived and not enumerated.** A build-time census finds every live-tree
+mutation site and every reported site is fixed; none is allowlisted. Three enumerations became stale
+within one planning cycle as sibling features merged, and two mutant basenames include
+`os.getpid()`, so a fixed list could not describe the set. The census is bounded by
+`.claude/skills/harness/bin/**`; a report outside that lane is escalated rather than silently
+written. `test-suite-independence.py` then walks the repository for test files independently of
+their layout and forbids writes through paths derived from `__file__`. It has no escape hatch.
+
+**Scheduling belongs to Python and selection remains in bash.** `run_pool.py` receives the selected
+script paths, runs them through a fixed thread pool, captures each subprocess's combined output, and
+prints one contiguous attributed block per completed file. The worker rule is
+`HARNESS_TEST_WORKERS` when explicitly set, otherwise `min(8, max(2, os.cpu_count() or 2))`. The cap
+reflects the measured 36.7 second floor set by the slowest file: workers beyond eight add fork and
+memory pressure for little possible wall-time gain.
+
+**Static source inspection is necessary but insufficient.** `run_pool.py --mutation-check` snapshots
+mode, size and nanosecond mtime for tracked and untracked entries beneath
+`.claude/skills/harness/bin` before and after execution. It catches mutant scripts that appear
+beside an original, symlink changes, and mutations hidden in a helper or subprocess.
+The watched set is deliberately the bin directory, not the repository root: agents continuously
+write `.harness/harness/features/**`, and a root-wide snapshot would redden a correct suite because
+a sibling wrote a note. A legitimate hand or agent edit inside bin during a run still trips the
+check, because it is indistinguishable from a test mutation.
+
+**The coverage boundary is explicit.** The runtime snapshot sees nothing outside bin. There the
+static scan is the only enforcement, with known blind spots: its taint begins only at literal
+`__file__`, so a target built from a relative literal or `os.getcwd()` can evade it; and it does not
+propagate taint through file content, so a target read from a manifest, config, or fixture is also
+unseen. The content exclusion is deliberate because propagating it produced fifteen false
+violations for writes beneath a tempdir and made a clean result impossible. A content-derived write
+inside bin is caught only when it changes an entry's mode, size or observed nanosecond mtime. A
+same-size rewrite that restores the original mtime is outside this metadata snapshot's coverage;
+content hashing is deferred rather than falsely claimed. No broader coverage is claimed.
+
+**The proposal of change-based test selection is REJECTED.** It makes coverage a function of the diff, allowing a
+gate to pass by selecting nothing. The runtime floor is dominated by one file that most changes
+reach indirectly, so selection does not remove the controlling cost. Finally, the dependency from
+a bash gate script to the test that forks it is not statically knowable, making apparently precise
+selection silently incomplete.
+
+**Measurements:** on 2026-08-31 at `ea6f51f`, a 12-core M3 Pro ran 56 files in 247 seconds
+serially, about 47 seconds with eight workers and 68.7 seconds with four; the single-file floor was
+about 36.7 seconds. These observations explain the policy but do not replace its invariants.
+
+## DEC-212 — A config-shape change is bound to the integration floor by a fixed predicate, closing the gap that let FEAT-41 T-01 ship a broken state gate green
+
+**Chose:** a new fixed predicate, `touches_config_shape`, added beside DEC-35's three
+(`touches_db_or_external`, `has_interaction_flow`, `match_bug_class`), and a `when` clause on the
+`config` change type: `{"kind": "integration", "if": "touches_config_shape"}`.
+**Over:** leaving `config.always: []` as the only rule (the status quo that let #1033 through);
+widening `config`'s `always` to unconditionally require `integration` (over-broad — a config VALUE
+edit, e.g. bumping a budget number, has no consumer blast radius and gains nothing from a forced
+integration run); inventing new test infrastructure (unnecessary — `test-check-state.py` already
+forks the real `check-state.sh` against a real `.harness/harness.json` fixture, and
+`test-factory-integration.py` already forks `board_lifecycle.py` against a real board built from
+`factory_config`; both are already members of `test_kinds.integration.detect` and already run under
+`--kind integration`).
+**Because:** measured live during FEAT-41's build (2026-08-30, issue #1033) — `github.board.stations`
+changed from a six-key mapping to an ordered list, one JSON value in one module. The task's own
+`verify:` (a unit-kind test exercising the validator in isolation) passed 112/112 and the task shipped
+committed green while `board_lifecycle.py`, `gh-sync.py` and `check-state.sh`'s own INV-26 block threw
+a `TypeError` against the changed shape — **the project's own state gate was down** for roughly twenty
+minutes in one worktree. The matrix's `cross_module` floor exists for exactly this blast radius but
+nothing bound a config-schema change to it: the change read as unit-scoped because nothing said
+otherwise. `touches_config_shape` asks qa to judge, from the diff, whether an edit changes the
+*container shape* of a value `harness.json` or `fleet.yaml` a gate script reads — a key's type,
+required-ness, or structural nesting — as distinct from changing the value a key already holds. That
+judgment is qa's, same as the other three predicates; fixing the name as data keeps it auditable
+rather than letting it silently vanish as prose (DEC-35).
+**Tradeoff accepted:** the predicate is a judgment call, not a mechanical diff rule — a boundary case
+(e.g. adding a new optional key to an existing object) is qa's call, same latitude DEC-35 already
+accepts for the other three. A separate, unfixed risk survives outside this decision's scope:
+`gh-sync.py`'s `board_lifecycle.audit_findings` call site degrades a consumer-side shape crash to a
+stderr line that `ship` does not fail on — hardening that swallow is future work, not part of this
+matrix binding.
+## DEC-213 — Harness's own tests live under tests/**, the directory is the kind, and tests/** is control-plane
+
+**Chose:** Harness's own executable tests live at the repository root under `tests/unit/**` and
+`tests/integration/**`, like tests in any other project. `.claude/skills/harness/bin/` holds the
+production scripts and their support modules. The directory containing a test is its kind; no
+registration list assigns either membership or kind.
+
+`tests/**` is a TARGET-side entry in `HARNESS_CONTROL_PLANE`.
+`is_control_plane_glob("tests/**")` remains false. This distinction lets the harness checkout treat
+its root test tree as control-plane while a product checkout's own test tree continues to resolve
+inside that product base. The write grant belongs to `harness-qa`, `harness-backend-dev`, and
+`harness-dev-ops`, and to no other seat. A test author therefore need not also hold permission to
+rewrite the enforcement script that the test exercises.
+
+**The kind criterion comes from issue 160.** A test is integration when an assertion depends on
+behaviour observed in a process other than the test's own: the artifact is executed as a script,
+the module is re-entered in a child, or the child exists to expose cross-process semantics. A child
+that only builds a fixture does not change the kind: `test-code-grade.py` may invoke git while the
+artifact remains in-process. A stub standing in for a dependency does not change the kind:
+`test-gh-board.py` invokes fake-gh but tests its own in-process module. A shim that only re-enters a
+test suite inherits that suite's kind: `test-omp-hooks.py` starts bun and remains unit. This rule
+requires behavioural inspection; token searches cannot distinguish those cases.
+
+**One predicate guards the shape.** `suite_layout.violations` runs before kind dispatch on every
+runner invocation. It refuses an empty kind directory, the same basename in both directories, or
+any test-shaped file left under bin. `tests/unit/test-suite-layout.py` drives the predicate
+directly, while `tests/integration/test-run-unit-tests-layout.py` proves the runner presents each
+refusal and discovers each directory. This single reader replaces parallel registration and drift
+checks that could disagree without seeing one another.
+
+`tests/manual/` contains probes and review instruments that no normal runner may execute and no
+active `test_kinds.detect` glob may match. The live-model probe belongs there because CI has no
+credentials and its output is not deterministic test evidence.
+
+**What this does not do.** Bin is free of test-named files, not necessarily test support.
+`layout_fixtures.py` is imported only by tests and remains in bin; nothing mechanical distinguishes
+such a fixture module from production code. Purpose-level classification remains issue 979's
+scope. The runtime mutation snapshot also remains limited to bin, so the static independence check
+is the binding protection for test files now outside it.
+
+**Considered and refused:** a third own-product base for Harness, because it adds a concept for one
+directory; renaming `is_control_plane_target`, because the behaviour would be identical and the
+enforcement-layer churn buys nothing; and retaining registration arrays as a directory
+cross-check, because that recreates the two-readers failure one level lower.

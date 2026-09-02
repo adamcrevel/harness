@@ -12,32 +12,32 @@ lock stays the one shared with every other write route in this feature.
     plan-merge.py add-tasks         --file <plan.yaml> --proposal <path or - for stdin>
     plan-merge.py set-task-station  --file <plan.yaml> --task T-NN --station <name>
     plan-merge.py set-feature-station --file <plan.yaml> --station <name>
+    plan-merge.py set-panel         --file <plan.yaml> --value-file <panel.yaml>
     plan-merge.py sign-approval     --file <plan.yaml> --by <name> --date <YYYY-MM-DD>
 
-FIVE VERBS, ONE WRITE ROUTE (FEAT-41 T-03). Every verb goes through
-harness_merge.locked_update and the text splice, and require_destination (exit 9) guards every
+CONTROLLED VERBS, ONE WRITE ROUTE (FEAT-41 T-03). Every mutating verb goes through
+harness_merge.locked_update and a text splice, and require_destination (exit 9) guards every
 path. ADD-ONLY IS A PROPERTY OF `apply` AND ITS ALIAS, NOT OF THE TOOL: the lock and the splice
-are what fix #628 and they hold for all five, while never deleting a task is a promise those two
-verbs alone make.
+are what fix #628 and they hold for every mutating verb, while never deleting a task is a promise
+those two verbs alone make.
 
 `set-task-station` and `set-feature-station` validate the station against the vocabulary
 factory_config declares — MANDATED_STATIONS plus TERMINAL_MARKER, imported, never respelled —
 resolved through the harness.json of the checkout the target plan.yaml belongs to. The check runs
 BEFORE the lock is taken, so a refused value never opens the file.
 
-`approval:` is written by EXACTLY ONE VERB, `sign-approval` (D-04, amended by FEAT-41 T-03).
-Every other verb leaves the base file's approval bytes byte for byte. The main session — nobody
-else — signs approval, and now does so through this tool rather than by hand. A proposal
+`approval:` has two controlled write paths: `apply` seeds a brand-new plan with the
+unsigned `status: pending` mapping, and `sign-approval` is the only path that can transition it
+to approved. Every verb operating on an existing plan leaves its approval bytes byte for byte.
+The main session — nobody else — signs approval through this tool rather than by hand. A proposal
 that carries an approval mapping which PARSES differently from the base's is a REFUSAL (exit 8),
 not a silent drop: `apply` must be INCAPABLE of writing a signature (step 7) and must also NOTICE
 a caller that tried to sneak one past it (step 7b) — two different jobs, so two different guards.
 
-THAT PROHIBITION IS UNCHANGED IN FORCE AND NARROWER IN SCOPE. Before FEAT-41 T-03 the tool had
-one verb, so "apply cannot sign" and "this tool cannot sign" were the same sentence; they are not
-any more. Signing moved from a hand edit into `sign-approval` so that it happens under the same
-lock as every other plan write — a signature spliced by hand while another writer held the file
-was the remaining unguarded route into plan.yaml. `apply` still cannot sign, and still refuses a
-proposal that tries.
+The creation exception is deliberately narrower than signing: a proposal cannot choose the pending
+mapping's contents, and the tool emits only its fixed status. Without this bootstrap, a newly
+created plan cannot later be signed because `sign-approval` correctly refuses to invent a missing
+mapping.
 
 Exit codes are the interface:
     0  applied — stdout lists ADDED/PRESERVED ids, an IGNORED-APPROVAL line if the proposal
@@ -50,8 +50,12 @@ Exit codes are the interface:
     8  the proposal's approval mapping parses differently from the base's
     9  --file does not resolve to a plan.yaml this tool owns
 
-python3 stdlib plus PyYAML (DEC-171 requires it here; imported plainly, never through
-harness_yaml.py — that divergence is raised upward as a decision question, not resolved here).
+python3 stdlib plus PyYAML (DEC-171 requires it here). Reads go through harness_yaml.py, same as
+every other harness tool (issue #720): a duplicate mapping key refuses here exactly as it would
+downstream, instead of merging clean and breaking the next reader. `import yaml` survives ONLY
+for `yaml.safe_dump` — harness_yaml.py exposes no serializer, and this file never re-renders a
+whole document through one regardless (see D-03 below); it splices bytes and re-parses its own
+splice as a self-check.
 """
 import argparse
 import hashlib
@@ -283,8 +287,8 @@ def _verify_signature(spliced_bytes, resolved, fields):
     defect this mirrors already uses -- an unwritable result, not a bad argument.
     """
     try:
-        reloaded = yaml.safe_load(spliced_bytes.decode("utf-8"))
-    except yaml.YAMLError as exc:
+        reloaded = harness_yaml.load_str(spliced_bytes.decode("utf-8"), "<spliced signature>")
+    except harness_yaml.YamlParseError as exc:
         raise harness_merge.MergeRefusal(
             5,
             [
@@ -316,8 +320,8 @@ def _verify_signature(spliced_bytes, resolved, fields):
 def _reload_or_refuse(spliced_bytes):
     """The spliced document, or a refusal naming the splice as the fault."""
     try:
-        return yaml.safe_load(spliced_bytes.decode("utf-8"))
-    except yaml.YAMLError as exc:
+        return harness_yaml.load_str(spliced_bytes.decode("utf-8"), "<spliced plan>")
+    except harness_yaml.YamlParseError as exc:
         raise harness_merge.MergeRefusal(
             5, ["UNPARSEABLE: the amended plan does not load — REFUSING to write it.",
                 f"  {exc}",
@@ -387,8 +391,8 @@ def _schema_error(doc):
 def _verify_spliced(spliced_bytes, base_doc, prop_doc, out_order, added_ids):
     """Refuse rather than return a splice that does not reload as the merge it reported."""
     try:
-        reloaded = yaml.safe_load(spliced_bytes.decode("utf-8"))
-    except yaml.YAMLError as exc:
+        reloaded = harness_yaml.load_str(spliced_bytes.decode("utf-8"), "<merged plan>")
+    except harness_yaml.YamlParseError as exc:
         raise harness_merge.MergeRefusal(
             5,
             [
@@ -510,15 +514,12 @@ def apply_merge(base_bytes, proposal_text):
     Raises harness_merge.MergeRefusal(5|7|8) with nothing to write, per plan-merge.py's contract
     with harness_merge.locked_update: a raised MergeRefusal leaves the file untouched."""
     if base_bytes is None:
-        # Step 3: a base that does not exist is an empty mapping; the proposal is written whole
-        # UNLESS it carries an approval key. Read together with step 7b (D-04): the empty
-        # mapping has no approval key at all, so a proposal's approval value always "differs"
-        # from the base's absent one — the same structural refusal step 7b applies elsewhere,
-        # here on the create path, so the tool never becomes capable of writing a signature to
-        # a brand-new file.
+        # A new plan needs an unsigned approval mapping before the main session can later sign it.
+        # The proposal may not supply that mapping: accepting any caller-owned value would let
+        # `apply` mint an approved plan, bypassing cmd_sign_approval's identity gate.
         try:
-            prop_doc = yaml.safe_load(proposal_text)
-        except yaml.YAMLError as exc:
+            prop_doc = harness_yaml.load_str(proposal_text, "<proposal>")
+        except harness_yaml.YamlParseError as exc:
             raise harness_merge.MergeRefusal(
                 5, [f"UNPARSEABLE: proposal failed to parse: {exc}"]
             )
@@ -527,23 +528,29 @@ def apply_merge(base_bytes, proposal_text):
             raise harness_merge.MergeRefusal(
                 8,
                 [
-                    "REFUSED: proposal carries an approval mapping and the base does not exist "
-                    "(treated as an empty mapping with no approval key).",
+                    "REFUSED: proposal carries an approval mapping and the base does not exist.",
                     "  base approval: <absent>",
                     f"  proposal approval: {prop_doc.get('approval')!r}",
-                    "  the signer is the main session; plan-merge.py never writes approval.",
+                    "  apply seeds a fixed pending mapping; only the main session may approve it through sign-approval.",
                 ],
             )
-        return proposal_text.encode("utf-8"), [], [], False
+        lines = proposal_text.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if FEATURE_LINE_RE.match(line):
+                lines[index + 1:index + 1] = ["approval:\n", "  status: pending\n"]
+                return "".join(lines).encode("utf-8"), [], [], False
+        raise harness_merge.MergeRefusal(
+            5, ["UNPARSEABLE: proposal carries no top-level feature: key to anchor approval."]
+        )
 
     base_text = base_bytes.decode("utf-8")
     try:
-        base_doc = yaml.safe_load(base_text)
-    except yaml.YAMLError as exc:
+        base_doc = harness_yaml.load_str(base_text, "<base plan>")
+    except harness_yaml.YamlParseError as exc:
         raise harness_merge.MergeRefusal(5, [f"UNPARSEABLE: base failed to parse: {exc}"])
     try:
-        prop_doc = yaml.safe_load(proposal_text)
-    except yaml.YAMLError as exc:
+        prop_doc = harness_yaml.load_str(proposal_text, "<proposal>")
+    except harness_yaml.YamlParseError as exc:
         raise harness_merge.MergeRefusal(5, [f"UNPARSEABLE: proposal failed to parse: {exc}"])
     base_doc = base_doc if isinstance(base_doc, dict) else {}
     prop_doc = prop_doc if isinstance(prop_doc, dict) else {}
@@ -915,6 +922,74 @@ def cmd_set_feature_station(args):
     print(f"STATION {resolved} -> {args.station}")
     print(f"APPLIED {resolved}")
     sys.exit(0)
+def _load_panel_value(path):
+    try:
+        panel = harness_yaml.load_file(path)
+    except harness_yaml.YamlParseError as exc:
+        raise harness_merge.MergeRefusal(
+            5, [f"plan-merge: cannot load panel value from {path}: {exc}"])
+    required = {
+        "last_run": str,
+        "cycle": int,
+        "readers": list,
+        "findings": list,
+    }
+    if not isinstance(panel, dict):
+        raise harness_merge.MergeRefusal(
+            5, ["plan-merge: panel value must be a mapping"])
+    missing = [key for key in required if key not in panel]
+    if missing:
+        raise harness_merge.MergeRefusal(
+            5, [f"plan-merge: panel value is missing required key(s): {', '.join(missing)}"])
+    wrong = [
+        key for key, expected in required.items()
+        if not isinstance(panel[key], expected) or (key == "cycle" and isinstance(panel[key], bool))
+    ]
+    if wrong:
+        raise harness_merge.MergeRefusal(
+            5, [f"plan-merge: panel value has invalid type for: {', '.join(wrong)}"])
+    return panel
+
+
+def cmd_set_panel(args):
+    resolved = _resolve_plan(args.file)
+    try:
+        panel = _load_panel_value(args.value_file)
+    except harness_merge.MergeRefusal as refusal:
+        for line in refusal.lines:
+            print(line, file=sys.stderr)
+        sys.exit(refusal.code)
+    replacement = yaml.safe_dump({"panel": panel}, sort_keys=False).splitlines(keepends=True)
+
+    def transform(base_bytes):
+        text = base_bytes.decode("utf-8")
+        lines, _order, ranges, _preamble = _index_top_keys(text)
+        if "panel" in ranges:
+            start, end = ranges["panel"]
+            lines[start:end] = replacement
+        elif "tasks" in ranges:
+            start, _end = ranges["tasks"]
+            lines[start:start] = replacement
+        else:
+            lines.extend(replacement)
+        spliced = "".join(lines).encode("utf-8")
+        reloaded = _reload_or_refuse(spliced)
+        if reloaded.get("panel") != panel:
+            raise harness_merge.MergeRefusal(
+                5, ["plan-merge: panel does not reload as the value supplied"])
+        return spliced
+
+    try:
+        harness_merge.locked_update(resolved, transform)
+    except harness_merge.MergeRefusal as refusal:
+        for line in refusal.lines:
+            print(line, file=sys.stderr)
+        sys.exit(refusal.code)
+    print(f"PANEL cycle {panel['cycle']} -> {resolved}")
+    print(f"APPLIED {resolved}")
+    sys.exit(0)
+
+
 
 
 def cmd_sign_approval(args):
@@ -961,21 +1036,34 @@ def cmd_sign_approval(args):
     def transform(base_bytes):
         text = base_bytes.decode("utf-8")
         lines = text.splitlines(keepends=True)
+        fields = {"status": "approved", "approved_by": args.by, "date": args.date}
         start = None
         for i, line in enumerate(lines):
             if re.match(r"^approval:\s*$", line):
                 start = i
                 break
         if start is None:
-            raise harness_merge.MergeRefusal(
-                5, [f"plan-merge: {resolved} carries no approval: mapping to sign"]
+            insert_at = next(
+                (i + 1 for i, line in enumerate(lines) if re.match(r"^feature:\s*", line)),
+                None,
             )
+            if insert_at is None:
+                raise harness_merge.MergeRefusal(
+                    5, [f"plan-merge: {resolved} carries no feature key before signing"]
+                )
+            approval = ["approval:\n"]
+            approval.extend(
+                _field_lines("  ", key, fields[key])
+                for key in ("status", "approved_by", "date")
+            )
+            spliced = "".join(lines[:insert_at] + approval + lines[insert_at:]).encode("utf-8")
+            _verify_signature(spliced, resolved, fields)
+            return spliced
         end = len(lines)
         for j in range(start + 1, len(lines)):
             if lines[j].strip() and not lines[j].startswith((" ", "\t")):
                 end = j
                 break
-        fields = {"status": "approved", "approved_by": args.by, "date": args.date}
         written = set()
         out = []
         for line in lines[start + 1:end]:
@@ -1271,8 +1359,8 @@ def _expected_value(rendered, indent, field):
     item_indent = indent[:-2] if len(indent) >= 2 else ""
     probe = f"_p:\n{item_indent}- id: _x\n" + "".join(rendered)
     try:
-        doc = yaml.safe_load(probe)
-    except yaml.YAMLError:
+        doc = harness_yaml.load_str(probe, "<rendered field probe>")
+    except harness_yaml.YamlParseError:
         return None
     items = (doc or {}).get("_p")
     if not isinstance(items, list) or not items or not isinstance(items[0], dict):
@@ -1299,8 +1387,8 @@ def _parsed_value(raw, key, iid, field):
     defect: first a quoting rule, then form preservation, now value extraction.
     """
     try:
-        doc = yaml.safe_load(raw)
-    except yaml.YAMLError:
+        doc = harness_yaml.load_str(raw, "<base plan>")
+    except harness_yaml.YamlParseError:
         return _UNPARSEABLE
     for item in (doc or {}).get(key) or []:
         if isinstance(item, dict) and item.get("id") == iid:
@@ -1308,18 +1396,8 @@ def _parsed_value(raw, key, iid, field):
     return _UNPARSEABLE
 
 
-def _amend_show(lines, located, field, actual, raw, key, iid):
-    """Print the field's VALUE and its hash, and exit.
-
-    THE VALUE, NOT THE BLOCK (panel N3): `--value-file` takes the bare value, and printing the
-    block with its `field:` key line meant feeding the output back wrote the key line INTO the
-    value at exit 0. The identity check cannot catch that, because the corrupted value is
-    byte-for-byte what the caller asked for.
-
-    THE PARSER IS THE AUTHORITY (panel F1). The line-based path survives only as the fallback
-    for a document that will not parse — which is the case this verb exists to repair — and it
-    says so on stderr rather than pretending to be exact.
-    """
+def _amend_show(lines, located, field, actual, raw, key, iid, yaml_value=False):
+    """Print the field value and its hash, preserving structured values only by opt-in."""
     first, last, indent = located
     value = _parsed_value(raw, key, iid, field)
     if value is _UNPARSEABLE:
@@ -1327,14 +1405,31 @@ def _amend_show(lines, located, field, actual, raw, key, iid):
                          "from raw lines and may not match what YAML would load. It is shown to "
                          "help you repair the document, not to be fed back verbatim.\n")
         sys.stdout.write(_dedent_value(lines[first:last], indent, field))
-    elif not isinstance(value, str):
-        _die(4, f"plan-merge: {iid}.{field} is a {type(value).__name__}, not text. amend "
-                f"replaces TEXT scalars; a list or mapping field would need its structure "
-                f"rewritten, which is apply's job.")
-    else:
+    elif isinstance(value, str):
         sys.stdout.write(value if value.endswith("\n") else value + "\n")
+    elif yaml_value and isinstance(value, (list, dict)):
+        sys.stdout.write(yaml.safe_dump(value, sort_keys=False))
+    else:
+        _die(4, f"plan-merge: {iid}.{field} is a {type(value).__name__}, not text. amend "
+                f"replaces TEXT scalars unless --yaml-value explicitly selects a list or "
+                f"mapping field.")
     print(f"sha256: {actual}")
     sys.exit(0)
+
+
+def _structured_field_lines(indent, field, value):
+    dumped = yaml.safe_dump({field: value}, sort_keys=False).splitlines(keepends=True)
+    return [indent + line if line.strip() else line for line in dumped]
+
+
+def _load_structured_value(path):
+    try:
+        value = harness_yaml.load_file(path)
+    except harness_yaml.YamlParseError as exc:
+        _die(5, f"plan-merge: cannot load structured value from {path}: {exc}")
+    if not isinstance(value, (list, dict)):
+        _die(5, "plan-merge: --yaml-value requires a YAML list or mapping")
+    return value
 
 
 def _amend_preconditions(args, actual):
@@ -1366,10 +1461,16 @@ def cmd_amend(args):
     actual = hashlib.sha256("".join(lines[first:last]).encode("utf-8")).hexdigest()
 
     if args.show:
-        _amend_show(lines, located, args.field, actual, raw, args.key, args.id)
+        _amend_show(lines, located, args.field, actual, raw, args.key, args.id,
+                    yaml_value=args.yaml_value)
     _amend_preconditions(args, actual)
-    with open(args.value_file, encoding="utf-8") as fh:
-        value_text = fh.read()
+    if args.yaml_value:
+        want_value = _load_structured_value(args.value_file)
+        value_text = None
+    else:
+        with open(args.value_file, encoding="utf-8") as fh:
+            value_text = fh.read()
+        want_value = None
 
     def transform(base_bytes):
         # THE BASE IS PARSED FIRST (panel V4, and its own de-vacuumed test). It used to be
@@ -1379,8 +1480,8 @@ def cmd_amend(args):
         # cleanly and say which document is at fault.
         raw = base_bytes.decode("utf-8")
         try:
-            base_doc = yaml.safe_load(raw)
-        except yaml.YAMLError as exc:
+            base_doc = harness_yaml.load_str(raw, "<base plan>")
+        except harness_yaml.YamlParseError as exc:
             raise harness_merge.MergeRefusal(
                 8, [f"plan-merge: the plan on disk does not parse, so amend cannot tell whether "
                     f"its own splice made things worse — {exc}"])
@@ -1395,18 +1496,18 @@ def cmd_amend(args):
                 4, [f"plan-merge: {args.id}.{args.field} vanished under the lock."])
         f2, l2, ind2 = loc2
         _require_locked_hash(cur[f2:l2], args.expect_sha256, args.id, args.field)
-        rendered = _render_field(ind2, args.field, value_text, cur[f2:l2])
+        if args.yaml_value:
+            current = _parsed_value(raw, args.key, args.id, args.field)
+            if not isinstance(current, (list, dict)):
+                raise harness_merge.MergeRefusal(
+                    5, [f"plan-merge: {args.id}.{args.field} is not a list or mapping under "
+                        "the lock; --yaml-value cannot change a scalar field's type."])
+            rendered = _structured_field_lines(ind2, args.field, want_value)
+            want = want_value
+        else:
+            rendered = _render_field(ind2, args.field, value_text, cur[f2:l2])
+            want = _expected_value(rendered, ind2, args.field)
         spliced = "".join(cur[:f2] + rendered + cur[l2:])
-        # THE CHECK THAT ACTUALLY BINDS (panel V3). The hash proves the block replaced is the
-        # block that was read; it cannot see that the splice landed in the wrong FIELD, nor that
-        # the value was re-formed on the way in, because both hashes are taken over whatever the
-        # locator returned. This compares the reloaded VALUE against what was asked for — the
-        # discipline `_verify_signature` already held for signing, and `amend` did not inherit.
-        #
-        # A `|` body KEEPS its trailing newline on reload, so the expected value is the file's
-        # bytes verbatim; a plain scalar carries none. Getting that backwards made the identity
-        # check refuse a CORRECT write, found by replacing a real `verify: |` with itself.
-        want = _expected_value(rendered, ind2, args.field)
         reloaded = _verify_amend(spliced.encode("utf-8"), args.key, args.id, args.field, want)
         # DO NO HARM: hold the splice to the plan schema only when the BASE satisfied it. A plan
         # mid-authoring legitimately does not, and refusing to amend it would make this verb
@@ -1454,6 +1555,8 @@ VERBS = (
      (_FILE, ("--task", "the task id, T-NN"), _STATION), cmd_set_task_station),
     ("set-feature-station", "set or insert the top-level status key",
      (_FILE, _STATION), cmd_set_feature_station),
+    ("set-panel", "replace the top-level panel mapping with a validated value",
+     (_FILE, ("--value-file", "YAML file holding the replacement panel mapping")), cmd_set_panel),
     ("sign-approval", "the ONLY route that writes the approval mapping",
      (_FILE, ("--by", "the signer's name"), ("--date", "YYYY-MM-DD")), cmd_sign_approval),
 )
@@ -1481,6 +1584,8 @@ def _register_amend(sub):
                    help="the sha256 --show reported; a replace is refused without it")
     p.add_argument("--value-file", default=None,
                    help="file holding the replacement value; may be multi-line")
+    p.add_argument("--yaml-value", action="store_true",
+                   help="read/write the value-file as a YAML list or mapping")
     p.set_defaults(func=cmd_amend)
 
 

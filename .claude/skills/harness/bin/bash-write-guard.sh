@@ -726,6 +726,46 @@ def feature_checkout_guard(rel, absolute_path):
         return
 
 
+def _worktree_stripped(rel):
+    """`rel` with a leading `.claude/worktrees/<name>/` segment removed, so a
+    checkout-agnostic rule can match a path regardless of which worktree it lives in.
+    Mirrors check-domain.sh's `_norm` — harness_boundary.py's own docstring keeps that
+    stripping local to each caller by design, not shared.
+    """
+    prefix = harness_boundary.WORKTREES_SEGMENT + "/"
+    if rel.startswith(prefix):
+        rest = rel[len(prefix):]
+        parts = rest.split("/", 1)
+        if len(parts) == 2:
+            return parts[1]
+    return rel
+
+
+def _run_artifact_guard(rel, absolute_path):
+    """Refuse a Bash write aimed at a run's digest.md or state.yaml (issue #1106, gap a).
+
+    The Write and Edit routes in check-domain.sh compare a proposed write against the
+    on-disk PRIOR content before it lands (issue #1058's digest prefix guard, issues
+    #1124/#1106's state.yaml run-identity guard). Bash has no equivalent: a shell command
+    carries no complete incoming payload to compare. A content guard is therefore
+    structurally impossible here, so a route denial is the weakest sufficient rule.
+
+    CHECKOUT-AGNOSTIC, DELIBERATELY (code review of PR #1249): unlike
+    `feature_checkout_guard`, whose whole question is "main checkout vs. worktree", this
+    rule is the same everywhere — Bash cannot safely write these two files in ANY
+    checkout, because the underlying gap (no payload to compare) does not depend on
+    which tree the write lands in. It must therefore run ahead of the DEC-153 worktree
+    carve-out below, not behind it: run artifacts normally live inside a feature's own
+    worktree (DEC-95), so placing this check where `feature_checkout_guard` sits would
+    make it inert for exactly the checkout run artifacts are usually written in.
+    """
+    if (harness_boundary.RE_RUN_DIGEST.match(rel)
+            or harness_boundary.RE_STATE_YAML.match(rel)):
+        deny(f"{absolute_path} is a run's digest.md or state.yaml. Bash carries no "
+             f"complete incoming payload to compare against the prior content, so this "
+             f"route cannot safely write it. Use the Write or Edit tool, where the "
+             f"content guard adjudicates.")
+
 # THE DOMAIN DECISION IS harness_boundary.classify's, NOT THIS FILE'S (issue #261).
 # This guard used to carry its own glob_to_re/matches pair and match raw globs with no
 # notion of the two bases and no control-plane target-side test. Measured at a29ad06,
@@ -738,6 +778,13 @@ for name, paths in findings:
         ap = os.path.abspath(os.path.join(root, p)) if not os.path.isabs(p) else p
         rel = os.path.relpath(ap, os.path.abspath(root))
 
+        # ISSUE #1106: run-artifact protection is CHECKOUT-AGNOSTIC and MUST run before
+        # the DEC-153 carve-out below — see _run_artifact_guard's own docstring for why.
+        # `_worktree_stripped` normalises a worktree-nested rel to the same shape the
+        # patterns expect, so a run under a feature's own worktree (the normal case,
+        # DEC-95) is covered exactly like one in the main checkout.
+        _run_artifact_guard(_worktree_stripped(rel), ap)
+
         # BOTH CONTINUES BELOW RUN AHEAD OF classify, AND THAT ORDERING IS BEHAVIOUR.
         # Worktree carve-out (DEC-153): disposable checkouts are where sanctioned
         # perturbation proofs live — qa mutates source there to prove a test
@@ -749,7 +796,6 @@ for name, paths in findings:
         # tmp/cache noise is not a domain question.
         if re.match(r"^(\.pytest_cache|node_modules|__pycache__|\.venv)", rel):
             continue
-
         verdict = harness_boundary.classify(ap, root, mine, shared, "bash-write-guard")
 
         if verdict["outcome"] == "out_of_place_worktree" and verdict.get("unparsed"):
@@ -764,6 +810,20 @@ for name, paths in findings:
                  f"{harness_boundary.WORKTREES_SEGMENT}/. Worktrees belong under "
                  f"{verdict['expected']} — that tree ({verdict['checkout']}) should be "
                  "removed with `git worktree remove` rather than written into.")
+
+        if verdict["outcome"] == "wrong_checkout":
+            # Issue #895, same ground as out_of_place_worktree above: this must run
+            # BEFORE the outside-repo `rel.startswith("..")` continue below, or the
+            # fix is dead on this route exactly as issue #103 was before the
+            # out_of_place_worktree block landed here — a target outside root always
+            # produces a rel starting with "..", which is what let a worktree-rooted
+            # Bash write reach the main checkout unrefused while the same target via
+            # the Write tool was already denied (DEC-151: two surfaces disagreeing is
+            # a bypass by construction).
+            deny(f"{ap} is in {verdict['checkout']}, but this session is rooted in "
+                 f"{verdict['root']}. Write it there instead: a domain grant is "
+                 "matched by relative path shape, and the identical path in a "
+                 "different checkout of this repository is not the same file.")
 
         # THE OUTSIDE-REPO CONTINUE, MOVED BELOW classify AND NARROWED TO A FILTER ON
         # THE OUTCOME (D-07). It has to run after classify or the issue #103 fix is dead

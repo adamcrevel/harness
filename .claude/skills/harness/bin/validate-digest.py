@@ -1557,6 +1557,115 @@ def check_artifact_file(agent, text, payload):
     return 2
 
 
+def _qa_claims_unconditional_pass(text):
+    """True iff `text`'s tail-anchored return is VERDICT: PASS with suite: pass AND
+    matrix_ok: true — the one claim #919 exists to independently re-verify."""
+    tail = text
+    anchors = list(re.finditer(r"^\s*VERDICT:", text, re.M))
+    if anchors:
+        tail = text[anchors[-1].start():]
+    verdict_match = re.search(r"^\s*VERDICT:\s*(\S+)", tail, re.M)
+    if (verdict_match.group(1) if verdict_match else None) != "PASS":
+        return False
+    seen = parse_digest(tail)
+    return seen.get("suite") == "pass" and seen.get("matrix_ok") is True
+
+
+def _resolve_run_unit_tests_bin(payload):
+    """The suite entrypoint to independently re-run, or None if it cannot be resolved.
+
+    RUN_UNIT_TESTS_BIN is test-only: it lets a fixture point this check at a fast stub
+    instead of spawning the real multi-minute suite for every hook-mode case.
+
+    A NAMED FEATURE MUST RESOLVE TO ITS OWN CHECKOUT, OR NOT AT ALL (code review of
+    #1185). check_artifact_file's owner_root/feature_root pattern falls back to
+    owner_root on any lookup failure, and that is safe THERE because a wrong root
+    means the specific run digest simply 404s, loudly. run-unit-tests.sh is a static,
+    always-present path: a wrong-root fallback here never 404s, it just silently
+    re-runs the suite against the WRONG checkout and reports that mismatched result as
+    though it verified the claim — reproducing #919's exact failure mode inside the
+    gate built to close it. So a feature_root lookup failure returns None (cannot
+    resolve) rather than substituting owner_root; the caller's existing "could not
+    independently re-run" fail-open path is where that lands.
+    """
+    run_bin = os.environ.get("RUN_UNIT_TESTS_BIN")
+    if run_bin:
+        return run_bin
+    owner_root = _root_or_none()
+    feature = payload.get("harness_feature")
+    if not feature:
+        base = owner_root
+    elif not owner_root:
+        base = None
+    else:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+            import inflight_registry
+            base = inflight_registry.feature_root(owner_root, feature)
+        except Exception:
+            base = None
+    if not base:
+        return None
+    return os.path.join(base, ".claude", "skills", "harness", "bin",
+                        "run-unit-tests.sh")
+
+
+def _reverify_suite(run_bin):
+    """Run `run_bin` and return its CompletedProcess, or None if it could not be run
+    at all (missing file, spawn failure, timeout) — every case is our gap, not theirs."""
+    if not run_bin or not os.path.isfile(run_bin):
+        return None
+    try:
+        return subprocess.run(["bash", run_bin], capture_output=True, text=True,
+                              timeout=1800)
+    except Exception:
+        return None
+
+
+def check_qa_matrix_claim(agent, text, payload):
+    """Issue #919: independently re-run the suite before trusting an unconditional
+    qa PASS, rather than trusting the claim on its own strength.
+
+    FEAT-37's qa gate reported the matrix green at a SHA where CI failed on the first
+    open PR: the qa note's discovered-script count was not read from a real run's own
+    output, and "ALL PASSED" was recorded anyway. `GATE_FAIL_VALUES` above can only catch a digest
+    that CONTRADICTS itself (`suite: fail` beside `VERDICT: PASS`); it cannot catch a
+    wrong-but-internally-consistent claim, because nothing before this re-executes the
+    thing being claimed. This does — the report is evidence only once it is checked.
+
+    FIRES ONLY on the highest-stakes claim: VERDICT: PASS with suite: pass AND
+    matrix_ok: true. A FAIL/BLOCKED/n/a claim already carries its own honesty
+    (`validate()` above already refuses `suite: fail` + PASS); re-running to confirm a
+    claimed failure buys nothing this hook is positioned to check for free.
+
+    FAIL OPEN, LOUDLY when the suite cannot be located or run at all (missing root,
+    missing script, a spawn OSError, a timeout) — check-domain.sh's precedent: a hook
+    whose own execution environment is broken must never be the reason a legitimate qa
+    return is blocked. FAIL CLOSED when the suite DOES run and disagrees with the
+    claim — that disagreement is exactly the gap #919 exists to close.
+    """
+    if not _qa_claims_unconditional_pass(text):
+        return 0
+    run_bin = _resolve_run_unit_tests_bin(payload)
+    result = _reverify_suite(run_bin)
+    if result is None:
+        print(f"check-digest: could not independently re-run the suite at {run_bin!r} "
+              f"— {agent}'s matrix_ok: true / suite: pass claim was NOT verified; this "
+              f"is our gap, not theirs.", file=sys.stderr)
+        return 0
+    if result.returncode == 0:
+        return 0
+    print(f"{agent} reported VERDICT: PASS with suite: pass and matrix_ok: true, but "
+          f"an independent re-run of run-unit-tests.sh at this checkout exited "
+          f"{result.returncode} — the gate reported evidence it did not have (issue "
+          f"#919). Re-run the suite yourself, fix what fails, and return again once "
+          f"it is genuinely green. Tail of the independent run:", file=sys.stderr)
+    for line in ((result.stdout or "") + (result.stderr or "")).splitlines()[-20:]:
+        print(f"  {line}", file=sys.stderr)
+    return 2
+
+
+
 # Distinguishes an ABSENT `last_assistant_message` from one that is present and null.
 # Module level so hook_mode() allocates nothing per invocation.
 _ABSENT = object()
@@ -1636,42 +1745,12 @@ def hook_mode():
             print("check-digest: no checkout root from this vantage — the #551 claim was "
                   "neither released nor checked.", file=sys.stderr)
         else:
-            # STEP ONE — THE RELEASE. OMP supplies feature and runtime identity, so its
-            # idempotent yield path can release exactly one claim even when the same persona
-            # is active in another feature. Claude Code retains the compatibility fallback.
+            # Read the return contract before releasing the parent's claim: an accepted
+            # suspension is nonterminal and therefore still owns that claim.
             _feature = d.get("harness_feature")
-            _agent_id = d.get("harness_agent_id")
-            _job_id = d.get("harness_job_id")
-            try:
-                _released = _reg.release(
-                    _root,
-                    agent=agent,
-                    feature=_feature,
-                    agent_id=_agent_id,
-                    job_id=_job_id,
-                )
-                if _released:
-                    print(f"check-digest: released the #551 claim for {agent}.",
-                          file=sys.stderr)
-            except Exception as _e:
-                print(f"check-digest: could not release {agent}'s claim ({_e!r}) — it will "
-                      f"expire or reconcile on supervisor loss. Not blocking on our own errand.",
-                      file=sys.stderr)
-
-            # STEP TWO — THE D-09 RETURN CONTRACT. Fires AT MOST ONCE per return, which is
-            # not a wait: a lead cannot be made to wait for its children, and D-09 records
-            # that as an impossibility rather than working around it. What this catches is
-            # FALSE REPORTING — occurrence 7 committed a verdict asserting a member's work
-            # was empty and unrecoverable while that member was still running and later
-            # returned PASS.
+            _kids = []
             if norm(agent) in ("lead", "orchestrator"):
                 try:
-                    # THE SESSION FILTER IS THE FIX FOR THE CASCADE (FEAT-42 T-17, #742/#866).
-                    # A claim stranded by ANOTHER session is not a live child of THIS return.
-                    # Measured 2026-08-26: one stranded pm claim refused the pm spawn at
-                    # dispatch-guard, then refused the LEAD's return here, then refused the
-                    # ORCHESTRATOR's return here again — three tiers locked out of reporting
-                    # by one strand, each stranding creating the next.
                     _kids = _reg.live_children(
                         _root,
                         agent,
@@ -1679,31 +1758,90 @@ def hook_mode():
                         feature=_feature,
                     )
                 except Exception as _e:
-                    _kids = []
                     print(f"check-digest: could not read children of {agent} ({_e!r}) — the "
                           f"#551 return contract is not enforced for this return.",
                           file=sys.stderr)
-                if _kids:
-                    for _line in _reg.children_refusal_lines(agent, _kids):
-                        print(_line, file=sys.stderr)
-                    # AND THE PRECISE REMEDY, ONE COMMAND PER STRANDED CHILD. The refusal
-                    # named the problem and no cure, so a reader reached for release-all —
-                    # which sets the registry to {} and wipes every claim of every agent.
-                    # On 2026-08-26 following that advice would have destroyed a live claim.
-                    try:
-                        print("  if one of these is stranded rather than running, release "
-                              "exactly it:", file=sys.stderr)
-                        for _persona, _c in _kids:
-                            print(
-                                "  %s" % _reg.release_cmd(
-                                    _root, _persona, feature=_c.get("feature")
-                                ),
-                                file=sys.stderr,
-                            )
-                    except Exception as _e:
-                        print(f"check-digest: could not compose the release command "
-                              f"({_e!r}).", file=sys.stderr)
-                    return 2
+
+            _raw_return = str(d.get("last_assistant_message") or "")
+            _anchors = list(re.finditer(r"^\s*VERDICT:", _raw_return, re.M))
+            _return_tail = _raw_return[_anchors[-1].start():] if _anchors else _raw_return
+            _verdict_match = re.search(r"^\s*VERDICT:\s*(\S+)", _return_tail, re.M)
+            _return_verdict = _verdict_match.group(1) if _verdict_match else None
+            _suspension_error = None
+            if _return_verdict == "SUSPENDED" and _kids:
+                _actual_children = {persona for persona, _claim in _kids}
+                _awaiting = parse_digest(_return_tail).get("awaiting")
+                if not isinstance(_awaiting, list):
+                    _suspension_error = "DIGEST.awaiting is not a YAML list"
+                elif not all(isinstance(persona, str) for persona in _awaiting):
+                    _suspension_error = "DIGEST.awaiting contains a non-string persona"
+                elif set(_awaiting) != _actual_children:
+                    _suspension_error = (
+                        f"DIGEST.awaiting names {sorted(set(_awaiting))}, expected "
+                        f"{sorted(_actual_children)}"
+                    )
+                else:
+                    print(
+                        f"check-digest: {agent} is suspended on "
+                        f"{', '.join(sorted(_actual_children))}.",
+                        file=sys.stderr,
+                    )
+                    return 0
+
+            # Terminal returns release. An unvalidated return with live children does not:
+            # the parent is still the only owner able to resume those children safely.
+            _keep_parent = bool(_kids and _return_verdict not in VERDICTS)
+            if not _keep_parent:
+                _agent_id = d.get("harness_agent_id")
+                _job_id = d.get("harness_job_id")
+                try:
+                    _released = _reg.release(
+                        _root,
+                        agent=agent,
+                        feature=_feature,
+                        agent_id=_agent_id,
+                        job_id=_job_id,
+                    )
+                    if _released:
+                        print(f"check-digest: released the #551 claim for {agent}.",
+                              file=sys.stderr)
+                except Exception as _e:
+                    print(f"check-digest: could not release {agent}'s claim ({_e!r}) — it will "
+                          f"expire or reconcile on supervisor loss. Not blocking on our own errand.",
+                          file=sys.stderr)
+
+            if _suspension_error is not None:
+                print(
+                    f"check-digest: REFUSED SUSPENDED return from {agent}: "
+                    f"{_suspension_error}; live children are "
+                    f"{sorted(persona for persona, _claim in _kids)}.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            if _kids:
+                if _return_verdict not in VERDICTS:
+                    print(
+                        f"check-digest: REFUSED unvalidated return from {agent}; "
+                        "live children still make this parent nonterminal.",
+                        file=sys.stderr,
+                    )
+                for _line in _reg.children_refusal_lines(agent, _kids):
+                    print(_line, file=sys.stderr)
+                try:
+                    print("  if one of these is stranded rather than running, release "
+                          "exactly it:", file=sys.stderr)
+                    for _persona, _c in _kids:
+                        print(
+                            "  %s" % _reg.release_cmd(
+                                _root, _persona, feature=_c.get("feature")
+                            ),
+                            file=sys.stderr,
+                        )
+                except Exception as _e:
+                    print(f"check-digest: could not compose the release command "
+                          f"({_e!r}).", file=sys.stderr)
+                return 2
 
     # PRESENCE, NOT TRUTHINESS. Absent, null and empty-string used to be ONE branch, so
     # the PLATFORM's gap — nothing supplied to validate — and the PERSONA's contract
@@ -1752,6 +1890,8 @@ def hook_mode():
         # the orchestrator's successor reads runs/<id>/digest.md, never this message.
         if norm(agent) == "lead":
             return check_artifact_file(agent, text, d)
+        if norm(agent) == "qa":
+            return check_qa_matrix_claim(agent, text, d)
         return 0
 
     print(f"Your return does not satisfy the digest contract, so it cannot be accepted. "

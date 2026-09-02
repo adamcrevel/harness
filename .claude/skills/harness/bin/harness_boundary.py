@@ -32,6 +32,18 @@ import sys
 # then blocks the main session on.
 WORKTREES_SEGMENT = ".claude/worktrees"
 
+# THE RUN-ARTIFACT PATTERNS, shared between check-domain.sh (content guards on the Write
+# and Edit routes) and bash-write-guard.sh (a route-only refusal on Bash, which carries no
+# complete payload to compare content against). Issue #1106: these used to live only inside
+# check-domain.sh's embedded Python, reachable by neither bash-write-guard.sh nor any other
+# caller — the same "split issue #261 reports" this module exists to close, recurring for a
+# second pair of patterns. One definition, both guards import it, so the two write surfaces
+# cannot silently disagree about which paths are protected.
+RE_RUN_DIGEST = re.compile(r"^\.harness/[^/]+/features/[^/]+/runs/[^/]+/digest\.md$",
+                            re.IGNORECASE)
+RE_STATE_YAML = re.compile(r"^\.harness/[^/]+/features/[^/]+/runs/[^/]+/state\.yaml$",
+                            re.IGNORECASE)
+
 # A directory is a harness checkout when it contains MARKER. Never a caller-supplied
 # parameter (FEAT-42 T-01): a parameter is what let each caller invent its own
 # definition — check-plan-routes.py probed team-config.yaml, factory_config.py probed
@@ -286,6 +298,7 @@ HARNESS_CONTROL_PLANE = [
     ".agents/**",
     ".omp/**",
     ".github/**",
+    "tests/**",
 ]
 
 
@@ -467,11 +480,13 @@ def select_base(abs_target, root, workspace_root, workspace_bases, fleet_path, l
 def is_control_plane_target(rel):
     """The TARGET-side test, used only in the harness base.
 
-    Target-keyed, not glob-keyed, and that is load-bearing: two of the four named
-    entries appear in no team-config grant, so a glob-keyed classifier would have
-    literally nothing to match them against. Anchored through the same `matches` idiom, so `README.md` means the
-    repository-root readme and never `docs/README.md`, and `.github/**` never matches
-    `vendor/.github/x`.
+    Target-keyed, not glob-keyed, and that is load-bearing: named entries may appear
+    in no team-config grant, so a glob-keyed classifier would have nothing to match
+    them against. `tests/**` is intentionally target-side only: keeping
+    `is_control_plane_glob("tests/**")` false leaves a product checkout's own tests in
+    its product base. Anchored through the same `matches` idiom, so `README.md` means
+    the repository-root readme and never `docs/README.md`, and `.github/**` never
+    matches `vendor/.github/x`.
     """
     if is_control_plane_glob(rel):
         return True
@@ -528,6 +543,26 @@ def classify(abs_target, root, globs, shared, label):
                     "checkout": _wt_owner[0], "owner_root": _wt_owner[1],
                     "unparsed": _wt_owner[1] is None,
                     "expected": worktree_refusal_location(_wt_owner[1])}
+
+        # WRONG CHECKOUT, SAME REPOSITORY (issue #895). abs_target can be outside
+        # BOTH bases and still be a real mistake rather than a scratch path: the main
+        # checkout, seen from a session rooted in one of its own worktrees, or a
+        # sibling worktree either way. Domain grants are declared once and matched by
+        # relative path SHAPE — the identical path exists, unrefused, in every
+        # checkout of the family — which is exactly what let FEAT-40's ship
+        # write-back land in main from a worktree session (commit 3952814). Checked
+        # AFTER out-of-place-worktree (an illegitimate placement is refused on that
+        # ground first) and BEFORE the not-a-domain-question fall-through, because
+        # /tmp and an unrelated repository are not this: this is the SAME repository,
+        # just the wrong tree of it.
+        _target_owner = _wt_owner[1] if _wt_owner is not None else None
+        _root_owner = worktree_owner(real(root))
+        _root_owner_root = _root_owner[1] if _root_owner is not None else None
+        if (_target_owner is not None and _root_owner_root is not None
+                and real(_target_owner) == real(_root_owner_root)):
+            return {"outcome": "wrong_checkout", "rel": None, "base": None,
+                    "advertise": [], "shared_advertise": [],
+                    "checkout": _wt_owner[0], "root": real(root)}
 
         # NOT A DOMAIN QUESTION, unchanged. bash-write-guard.sh already said so
         # ("outside repo — not this hook's problem"), and check-domain did not: a
