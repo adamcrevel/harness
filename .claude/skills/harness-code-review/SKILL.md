@@ -16,7 +16,9 @@ Wrong-thing-built-well is the costlier failure, and finding it second wastes the
 
 ## Stage 1 — spec compliance
 
-Read `.harness/features/<FEAT>/BRIEF.md` and `PLAN.md ## Decisions`, then the diff. Ask four questions:
+Read `.harness/harness/features/<FEAT>/BRIEF.md` and the plan's decisions — `plan.yaml`'s `decisions:` list,
+or `PLAN.md ## Decisions` for a feature still on the pre-DEC-182 format — then the diff. Ask four
+questions:
 
 1. Does every change serve a documented `REQ-NN` or `D-NN`?
 2. Is anything here that **no** requirement asked for? *(scope creep — a finding even when it is an
@@ -48,6 +50,58 @@ block or does it sail through?*
 
 Do **not** report what a linter catches, and do not restyle to personal preference.
 
+### Grade changed Python
+
+Run the grader against the pinned review, never `HEAD`:
+
+```sh
+python3 .claude/skills/harness/bin/code-grade.py \
+  --base "$(git merge-base origin/main "$review_sha")" \
+  --head "$review_sha"
+```
+
+For every gated record that blocks the build — below its bar and not grade 2 — record a **high**
+finding naming its file, line, qualified name, the three reported numbers, and its driver metric;
+report `code_grade: fail` for it. This is not only grade 1: a grade-3 production function below the
+grade-4 production bar blocks identically, and the tool marks it the same way — `SEVERITY: high` in
+its report (JSON: `"severity": "high"`) and `RESULT: FAIL`. A record that passes its bar carries no
+`SEVERITY:` line at all; do not report a finding for it. For every gated grade-2 function, record a
+**med** finding naming the function and a written answer to every `REASON REQUIRED` line the tool
+emits; grade 2 never blocks the build (`RESULT: FAIL` still prints, but the run exits clean once
+reasoned) and is reported as `code_grade: grade_2`, never `fail`.
+
+### The enum is an audit claim, not evidence of itself
+
+**`validate-digest.py` recomputes `code_grade` independently and refuses your digest when it
+disagrees.** It grades `merge-base(<default branch>, review_sha)..review_sha` — the range the
+repository derives, which the `reviewed:` field you write cannot change — and compares the result
+with the value you reported. You still run the grader yourself: that is how you cite blocking
+records by file, line and driver metric, and how you write a reasoned answer to every
+`REASON REQUIRED` line. What you no longer do is decide the value. A review that skipped the tool,
+or whose run crashed, or that reported a blocking result as a clean one, is now rejected at source
+rather than accepted on your word.
+
+Three consequences worth knowing before you write the field:
+
+- **No changed Python path in that range means `n_a`** — and nothing else does. A range whose only
+  Python change is a DELETION is `pass`, not `n_a`: a Python file changed, there is simply no
+  head-side function left to gate.
+- **A mismatch refusal names the value the repository expected**, so the repair is to rerun the
+  grader over the canonical range and report what it reports — never to guess another enum value.
+- **A grading failure refuses the digest and tells you how to repair the checkout.** An unresolvable
+  `origin/HEAD`, a `review_sha` that does not resolve, no merge base with the default branch, a
+  range that is empty by construction because `review_sha` is already an ancestor of the default
+  branch, a missing or malformed `test_kinds` policy, or committed Python that does not parse — each
+  refuses, by name. None of them falls back to your `reviewed:` base, because a checkout that cannot
+  derive the repository's own range cannot prove any mechanical result. Fix the checkout or the pin
+  and rerun; there is nothing to write around it.
+
+The mechanical result is not the review. A clean grade decides nothing on its own: `must_fix`,
+severity and the review policy remain yours, and they still fail a mechanically clean change. The
+tool informs judgement; it is never the last word. Raise a `must_fix` when review judgement finds
+broken behaviour even if every grade improved, and never treat a clean grade report as a passing
+review by itself.
+
 ## Findings need failure scenarios
 
 Every finding states **specific inputs or state → specific wrong outcome.**
@@ -74,7 +128,7 @@ Every finding states **specific inputs or state → specific wrong outcome.**
 
 ## Review a pinned SHA
 
-Diff `base..review_sha` from `.harness/features/<FEAT>/review_sha` — **never `..HEAD`**. A commit landing
+Diff `base..review_sha` from `.harness/harness/features/<FEAT>/review_sha` — **never `..HEAD`**. A commit landing
 mid-review must not change what you reviewed.
 
 Check for `[harness:human]` commits since the last pin: those are hand edits that **inherit no earlier

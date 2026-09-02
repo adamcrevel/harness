@@ -3,7 +3,11 @@
 
 D-12: this is the ONLY `try: import yaml / except ImportError:` in the whole
 tree. It parses nothing itself — it exits or grants. Every other module in
-this tree that needs YAML imports THIS module, never `yaml` directly.
+this tree that needs YAML imports THIS module, never `yaml` directly — with
+one named exception, `plan-merge.py`, which is required to import PyYAML
+plainly. That tool therefore parses under plain PyYAML semantics, not this
+module's duplicate-key strictness (`DuplicateKeyError`, raised below): the
+two loaders disagree about what counts as a valid plan file.
 
 Import-time behaviour is exactly the one `try/except` below and the loader
 class definitions that follow it (pure class construction, no I/O). No
@@ -18,6 +22,8 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+_BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # --- Errors -----------------------------------------------------------------
@@ -54,7 +60,7 @@ class MissingDependency(YamlParseError):
         Exception.__init__(
             self,
             "PyYAML is not importable by this python3 interpreter, so no YAML can "
-            "be read. It is REQUIRED, not optional (DEC-171 am.1):\n" + INSTALL_COMMAND)
+            "be read. It is REQUIRED, not optional (DEC-171):\n" + INSTALL_COMMAND)
 
 
 class DuplicateKeyError(YamlParseError):
@@ -255,6 +261,130 @@ def load_file(path):
     return load_str(text, path)
 
 
+
+# --- The plan reader (issue #147) -------------------------------------------
+
+class PlanSchemaError(YamlParseError):
+    """A plan.yaml that PARSES but does not carry the shape every consumer needs.
+
+    Distinct from YamlParseError on purpose. "This is not YAML" and "this is YAML
+    that means nothing to me" are different repairs, and a caller that wants to
+    report them differently can. Both are catchable as YamlParseError, so a caller
+    that does not care still gets one handler — the same subclassing argument
+    DuplicateKeyError already settled.
+    """
+
+
+# The fields every task must carry, and what each is FOR. Kept beside the check so
+# a reader learns the contract from the code that enforces it rather than from a
+# template that can drift — which is exactly how issue #147 happened: the template
+# prescribed one `files:` shape while the parser accepted three, and nobody could
+# say which was right.
+# `intent:` IS REQUIRED, and leaving it out of the first draft was exactly backwards.
+# It is the ONE field the team runner dispatches on (`teams/build.yaml`,
+# `prompt: from_task_intent`) and the one `gh-sync.py:173` puts in an issue body. Without
+# it here, a plan carrying an empty or absent intent loaded CLEAN, got signed, and opened
+# empty-bodied sub-issues. The least-validated field was the most-read one.
+REQUIRED_TASK_FIELDS = ("id", "title", "change_type", "execution_mode", "files", "verify",
+                        "intent")
+LEGAL_EXECUTION_MODES = ("team", "main-session-direct")
+
+
+def load_plan(path):
+    """Load a `plan.yaml` and validate the shape its consumers depend on.
+
+    WHY THIS EXISTS RATHER THAN load_file: PLAN.md was markdown that LOOKED like
+    YAML, so three scripts hand-rolled regexes against it and each invented its own
+    rule for what a value may contain. Measured before the change: `safe_load` fails
+    on 35 of the 36 task blocks in the four live plans — 26 because
+    `files:` began with a backtick, which is a reserved YAML indicator (one of
+    those is ALSO `execution_mode: **SPLIT`, which reads as an alias — the same
+    block, not a 27th), and 9 because `execution_mode: <mode> — reason: ...`
+    puts a second `": "` inside a plain scalar. Those are not style
+    problems; they are the format inviting decoration into data fields.
+
+    A FENCED ```yaml BLOCK INSIDE MARKDOWN WAS CONSIDERED AND REFUSED. It is the
+    same mixture with a border drawn round it: an author who decorates a value
+    today decorates it inside a fence tomorrow. The fence makes the mistake loud
+    instead of silent, which is worth something, but it is compensating code for a
+    problem the format invites. A plain `.yaml` file cannot tempt the author,
+    because nothing else in it is prose.
+
+    Raises YamlParseError if it is not YAML, PlanSchemaError if it is YAML that a
+    consumer could not act on. Never returns a partially-valid plan: a caller that
+    got a dict back can index every field named in REQUIRED_TASK_FIELDS.
+    """
+    return validate_plan_doc(load_file(path), path)
+
+
+def validate_plan_doc(doc, path):
+    """Validate an ALREADY-PARSED plan document, returning it, or raise PlanSchemaError.
+
+    EXTRACTED SO THE READER AND THE WRITER CANNOT DISAGREE (FEAT-41 HIGH-1). `plan-merge.py`'s
+    pre-write check parsed the merged result with `yaml.safe_load`, which answers "is this YAML"
+    and not "is this a legal plan" -- so every rule below was invisible to the writer, and `apply`
+    persisted a document no reader could load while reporting APPLIED at exit 0.
+
+    A writer-side COPY of these rules would have been a second place for them to stop being true,
+    which is the defect this whole feature keeps finding. One home, two callers.
+    """
+    if not isinstance(doc, dict):
+        raise PlanSchemaError(path, "top level is not a mapping")
+
+    tasks = doc.get("tasks")
+    if not isinstance(tasks, list):
+        # A plan with no tasks is not a plan. Silence here would be the same
+        # fail-open B-7 was: a checker reporting a clean tree it never looked at.
+        raise PlanSchemaError(path, "`tasks:` is missing or not a list")
+    _validate_station_only(doc, tasks, path)
+    _validate_plan_tasks(tasks, path)
+    return doc
+
+
+def _validate_plan_tasks(tasks, path):
+    """Validate every task in a plan: shape, required fields, unique ids, legal modes.
+
+    SPLIT OUT OF `validate_plan_doc` BY CONCERN. That function answers two questions -- is the
+    DOCUMENT well formed, and is every TASK well formed -- and holding both put it at grade 1 on
+    control-flow volume alone. The split is along the seam the questions already had; nothing
+    here is shared with the document-level rules above.
+    """
+    seen = set()
+    for i, t in enumerate(tasks):
+        where = f"tasks[{i}]"
+        if not isinstance(t, dict):
+            raise PlanSchemaError(path, f"{where} is not a mapping")
+        missing = [f for f in REQUIRED_TASK_FIELDS if t.get(f) in (None, "", [])]
+        if missing:
+            raise PlanSchemaError(
+                path, f"{where} ({t.get('id') or 'no id'}) is missing {missing}")
+        tid = str(t["id"])
+        if tid in seen:
+            # The duplicate would silently shadow in every id-keyed consumer —
+            # the dispatch map, gh-sync's issue map, INV-5's membership test.
+            raise PlanSchemaError(path, f"duplicate task id {tid!r}")
+        seen.add(tid)
+
+        files = t["files"]
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            # ISSUE #147's FIRST QUESTION, answered by the type rather than by a
+            # ruling: `files:` is a sequence of strings. Block and flow style load
+            # identically, so the three shapes the old parser accepted collapse into
+            # one thing nobody has to adjudicate.
+            raise PlanSchemaError(path, f"{where} ({tid}) `files:` must be a list of strings")
+
+        mode = t["execution_mode"]
+        if mode not in LEGAL_EXECUTION_MODES:
+            # ISSUE #147's THIRD QUESTION. `execution_mode: **SPLIT` used to be
+            # captured verbatim by a `(\S+)` regex and reported as an unrecognised
+            # token; here it cannot even be written, because `**` opens an alias and
+            # load_file raises first. A task with two routes is two tasks.
+            raise PlanSchemaError(
+                path,
+                f"{where} ({tid}) execution_mode {mode!r} — legal values are "
+                f"{', '.join(LEGAL_EXECUTION_MODES)}")
+
+
 # --- Manifest domain walk (D-03) --------------------------------------------
 
 def manifest_domains(manifest_path, agent):
@@ -342,9 +472,30 @@ def require_or_die():
     """For check-state.sh and the plain .py scripts. No bootstrap escape
     (D-06) — this gates the orchestrator, not a write, so a hard block here
     costs no recovery path."""
-    root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    marker = _marker_path(root)
     if yaml is not None:
+        # The resolved root is used for exactly one thing below: best-effort
+        # unlink of the PyYAML bootstrap marker. That cleanup must never be able
+        # to abort THIS caller's caller — check-state.sh, the canonical
+        # pre-commit state checker, calls require_or_die() near its own top
+        # (check-state.sh:35), BEFORE its own later, properly guarded INV-25/
+        # INV-27 checks ever run. A missing harness_boundary.py (ImportError) or
+        # a root the resolver cannot verify (resolve_root's own strict raise) is
+        # a DIFFERENT module's problem, not a reason to deny PyYAML availability
+        # for every downstream consumer including checks that exist to REPORT
+        # exactly that kind of breakage. Confirmed live: an isolated bin/
+        # carrying only harness_yaml.py (no harness_boundary.py — check-state.sh's
+        # own u.7/x.5 fixtures build exactly this) made this raise UNCAUGHT,
+        # so require_or_die() died with a raw traceback before check-state.sh
+        # ever reached its guarded `import harness_boundary as _hb` at :1080 to
+        # report the INV-25 CANNOT RUN violation that fixture exists to prove.
+        # Fail-open, the same class T-05 already fixed one caller earlier for
+        # bash-write-guard.sh/check-domain.sh.
+        try:
+            import harness_boundary
+            root = harness_boundary.resolve_root(_BIN_DIR)
+        except Exception:
+            return
+        marker = _marker_path(root)
         try:
             os.unlink(marker)
         except OSError:
@@ -492,3 +643,66 @@ def require_or_bootstrap(root, payload=None):
         # Never let the courtesy channel break the grant it is announcing.
         pass
     return True
+
+
+def _validate_station_only(doc, tasks, path):
+    """The two `station_only` rules, a MATCHED PAIR: neither direction is safe without
+    the other, which is exactly what HIGH-1 proved. One function per direction, because
+    each carries a compound predicate and holding both kept this below the grade bar.
+    """
+    claimed = doc.get("station_only")
+    _refuse_an_empty_plan_that_claims_nothing(claimed, doc, tasks, path)
+    _refuse_a_minted_marker(claimed, tasks, path)
+
+
+def _refuse_an_empty_plan_that_claims_nothing(claimed, doc, tasks, path):
+    declares_station = bool(str(doc.get("status") or "").strip())
+    if not tasks and not (claimed is True and declares_station):
+        # A STATION-ONLY RECORD IS LEGAL; AN ACCIDENTALLY EMPTY PLAN IS NOT (FEAT-41 T-19).
+        #
+        # The rule above is narrowed, NOT relaxed, and the reason it was written for is the
+        # reason the narrowing is safe. Under the one-record rule every feature needs a plan.yaml
+        # to hold its station, and twelve directories had none -- they predate the format or were
+        # opened as bug fixes. For those the honest content is a station and no tasks; inventing
+        # tasks to satisfy a schema would be fabrication.
+        #
+        # THE MARKER IS REQUIRED, AND `tasks: []` PLUS `status:` IS NOT ENOUGH (FEAT-41 MF-3).
+        # The first version of this keyed on the ABSENCE of tasks, and cycle 3 proved end to end
+        # what that cost: a Bash write emptied a SIGNED plan's `tasks:` while keeping its
+        # `approval:` and `status:`, and the emptied document inherited the station-only
+        # exemption downstream -- a real dangling-task violation went SILENT. An emptied plan
+        # carries no `station_only:` marker, so it now fails to LOAD, and a plan that does not
+        # load is already a violation. The forged state became louder than the check it escaped.
+        #
+        # AN ABSENCE CANNOT BE A CREDENTIAL. That is the general form of the mistake, and it is
+        # the same shape as B-7's fail-open: a checker must be told a fact, never infer one from
+        # a missing field.
+        raise PlanSchemaError(
+            path,
+            "`tasks:` is empty, so this must be a station-only record and must SAY so: it "
+            "needs `station_only: true` and a top-level `status:`. An emptied plan is not a "
+            "station-only record.")
+
+
+def _refuse_a_minted_marker(claimed, tasks, path):
+    if claimed is not None and (claimed is not True or tasks):
+        # AND THE CONVERSE, WHICH MF-3 OMITTED (FEAT-41 HIGH-1, cycle 4, two reviewers
+        # independently). The marker was checked in ONE direction only -- empty tasks means the
+        # marker is required -- and never the other, so it could be MINTED onto a task-bearing
+        # signed plan through the ungated `apply` verb or a raw Bash write. It then silenced the
+        # approval and STATE.md-task checks for that feature, durably.
+        #
+        # MF-3 REPLACED AN ABSENCE-AS-CREDENTIAL WITH A FORGEABLE ONE, which is the same mistake
+        # wearing the opposite sign. A credential must be checked BOTH ways: present when claimed,
+        # and not claimable when false.
+        #
+        # THE LOADER IS THE RIGHT CHOKEPOINT, and a writer-side fix could not do this job: the
+        # BRIEF's own disclosure is that Bash writes are unmediated, so anything that only guards
+        # `plan-merge.py` leaves the shell route open. Everything that reads a plan comes through
+        # here.
+        raise PlanSchemaError(
+            path,
+            "`station_only:` may only be `true` on a record with an EMPTY `tasks:` list. A plan "
+            "that carries tasks is not a station-only record, and the marker cannot be used to "
+            "exempt one from the approval and STATE.md checks.")
+

@@ -6,38 +6,108 @@ user-invocable: false
 
 # Spec-Driven Planning
 
-You author `BRIEF.md` and `PLAN.md`. They are the spec — there is no separate spec artifact.
+You author `BRIEF.md` and `plan.yaml`. They are the spec — there is no separate spec artifact.
+
+**`plan.yaml` is REAL YAML, and nothing in it is prose for a human** (DEC-182). The human reads
+`BRIEF.md`. Instantiate from `.agents/skills/harness/templates/plan.yaml`.
+
+**Every write goes through a verb. There is no other route** — not an `Edit`, not a `Write`,
+not a shell redirect. The shape gate denies all three, and a station outside the vocabulary
+`harness.json` declares is refused before the file is opened.
+
+```bash
+python3 .agents/skills/harness/bin/plan-merge.py apply \
+  --file .harness/<repo>/features/<FEAT>/plan.yaml --proposal -
+```
+
+`apply` unions by task and decision `id`, so a second pm spawn cannot delete the first's tasks.
+The `approval:` block is carried forward byte identical and any approval block in your
+proposal is ignored. Exit 7 means one `id` carries two different values — yours to resolve.
+
+The other three verbs change a value `apply` will not touch, each splicing one line under the
+same lock:
+
+- `set-task-station --file <plan.yaml> --task T-NN --station <name>` — a task's station.
+- `set-feature-station --file <plan.yaml> --station <name>` — the feature's own station.
+- `sign-approval --file <plan.yaml> --by <name> --date <YYYY-MM-DD>` — **the main session
+  only.** You never sign; approval records a decision only the user can have made (DEC-120).
+
+A station is one of the six `harness.json` declares — `backlog plan ready building review
+done` — or `abandoned`. `pending` is not a station and never was one.
+
+**No markdown in any value — no backticks, no `**bold**`, no links.** They are decoration in a data
+file. Measured on the format this replaced: `safe_load` over every task block in the four live plans
+failed 43 of 44 times, 26 of them because `files:` began with a backtick. A value carrying
+decoration is either rejected by the loader or handed to a resolver as a path nobody wrote.
+
+Shipped `PLAN.md` files are never rewritten; their reader stays. You author `plan.yaml`.
 
 ## Every task needs four things
 
 A task missing any of them is **not written**. Identify the gap and return it rather than guessing:
 
-1. **Exact file paths.** Not "update the config" — `edit .harness/harness.json`.
-2. **Complete intent.** Not "implement X" — the actual logic, types, structure, values.
+1. **Exact file paths**, as a YAML list of plain strings — one path per entry. Not a comma string,
+   not backticked, and **no trailing annotation** like `(delete)`: the resolver takes the value
+   verbatim, so an annotation becomes part of the path and resolves to nothing. Intent about a path
+   goes in `intent:`, not beside it.
+2. **Complete intent.** Not "implement X" — the actual logic, types, structure, values. `intent:` is
+   the LITERAL DISPATCH PROMPT: the agent doing the work receives it and nothing else about the
+   task. Detail that only JUSTIFIES the instruction — probe transcripts, why an earlier draft was
+   wrong — belongs in `notes/`, not here.
 3. **A `verify:` command** with the expected result. Runs in under 60 seconds, gives an unambiguous
    pass/fail, needs no human interpretation. If nothing automated is possible, say so explicitly:
    `verify: MANUAL — <what must be built first to make this automatable>`.
-4. **`traces:`** — the `REQ-NN` or `D-NN` this task serves. A task that cannot cite its source is either
-   out of scope or the brief is incomplete.
+   **Write it as a literal block `|`, never a folded `>`** — see below; this one is not a style
+   preference.
+4. **`traces:`** — the `REQ-NN` this task serves, as a list. A task that cannot cite its source is
+   either out of scope or the brief is incomplete. `D-NN` goes in the `decisions:` block, not here:
+   carrying both made the field mean two things and nothing ever read the second.
 
 Plus **`change_type:`** on every task. The qa gate reads it to determine required tests, and a task
 without one **blocks that gate** — `check-state.sh` fails the state check on it.
 
 ## Routing is resolved at plan time
 
-Every task carries `execution_mode:`, in one of exactly two forms:
+Every task carries `execution_mode:`, a bare enum with exactly two legal values, and its
+explanation in a sibling key:
 
-```
-execution_mode: team — <agent> (team-config.yaml:NN)
-execution_mode: main-session-direct — reason: <why>
+```yaml
+execution_mode: team
+execution_agent: harness-backend-dev
+
+execution_mode: main-session-direct
+execution_reason: DEC-174 carve-out — check-domain.sh is a registered PreToolUse gate script
 ```
 
-And every PLAN opens with a `## Lanes` table, resolved against
-`.harness/team-config.yaml` at a named SHA.
+**A task that needs BOTH routes is TWO TASKS.** There is no split mode. FEAT-08 T-04 tried to write
+one as `execution_mode: **SPLIT (D-10…)`; the regex captured `**SPLIT`, reported it as an
+unrecognised token, and the eng squad hit exit 2 on it. Splitting the enum from its reason is what
+makes that unwritable.
+
+And every plan opens with a `lanes:` block, resolved against `.harness/team-config.yaml` at a named
+SHA.
 
 **Before handing a plan back, run
-`python3 .claude/skills/harness/bin/check-plan-routes.py <plan path>` and fix every
+`python3 .agents/skills/harness/bin/check-plan-routes.py <plan path>` and fix every
 violation. A non-zero exit is not a plan that is ready for signature.**
+Run it here because plan time is when the fix is one edit, not a rewrite of work already built.
+The `integration` CI job runs the same checker over every live plan and is a required check on
+`main` (DEC-183), so skipping this does not skip the finding — it only makes it expensive.
+
+## `verify:` is a literal block, and this one has teeth
+
+```yaml
+verify: |            # correct — newlines survive
+  python3 .agents/skills/harness/bin/run-unit-tests.sh
+
+verify: >            # WRONG — folding turns every newline into a space
+  python3 ...
+```
+
+The lead carries this string **verbatim** to the member, which cross-checks it against the plan and
+returns `BLOCKED` on any mismatch (`harness-zero-micro-management`). A folded scalar loads as a
+different string than the one on disk, so a correct task blocks. Use `|`, or a single-line plain
+scalar.
 
 What it prevents: a task dispatched to an agent whose domain denies the write,
 discovered mid-build with the build spine already open — three features running.
@@ -45,6 +115,17 @@ discovered mid-build with the build spine already open — three features runnin
 **An ungranted surface is legitimate.** It becomes a declared main-session step with
 its ordering constraint written down — not a task that silently fails when someone
 tries to dispatch it.
+
+## The panel result
+
+pm transcribes the validator lead's digest into plan.yaml's top-level `panel` key and never edits
+a finding's severity. Compute every id with
+`python3 .claude/skills/harness/bin/panel_findings.py id --reader <r> --summary <s>`; never type it.
+Transcribe one `panel.readers` entry for EVERY named reader, including `skipped` with the persona
+and the lead's reason. Never convert a skipped reader into one that ran cleanly or omit it because
+it produced no findings. A finding pm believes fixed remains present with disposition `resolved`
+and `resolved_by: T-NN`. The operator's overrule belongs in `approval.rulings`; that is the main
+session's write, never pm's.
 
 ## Reject placeholders
 
@@ -72,7 +153,7 @@ classic D-NN: record the load-bearing reason so it is not re-litigated.
 
 ## The glossary — the domain's language is yours to keep sharp
 
-`.harness/codebase/glossary.md` is your map lens for the domain's **ubiquitous language**: one
+`.harness/glossary.md` is the domain's **ubiquitous language**: one
 canonical term per concept, no implementation detail — a glossary, never a spec or scratch pad.
 Working rules (DEC-149, adapted from domain-modeling practice):
 
@@ -84,16 +165,16 @@ Working rules (DEC-149, adapted from domain-modeling practice):
 - **Code wins:** when a stated meaning contradicts what the code does, surface the contradiction —
   the same re-derive discipline you already apply to anchors, aimed at language.
 - **Update inline, at the moment a term is settled** — a feature that pins a vocabulary (an enum,
-  a status set) updates the glossary in the same ship-refresh pass that updates your
+  a status set) updates the glossary in the same pass that updates your
   product-surface lens. Create the file lazily; empty is worse than absent.
 
 ## Citations and baselines rot — anchor them so they cannot (B-11, B-12)
 
 Two failure shapes, both measured on FEAT-03 where four citations were stale before the build began:
 
-- **Cite the FIELD, never the line, in any file the org rewrites.** `feature.yaml:41` was cited four
+- **Cite the FIELD, never the line, in any file the org rewrites.** `feature.json:41` was cited four
   times for `parent: none`; the orchestrator rewrote that file every run and line 41 became
-  `squad: eng`. Write `feature.yaml github.parent` instead. Line anchors are correct only into files
+  `squad: eng`. Write `feature.json github.parent` instead. Line anchors are correct only into files
   a task does not touch — source, migrations, a pinned SHA's tree.
 - **A recorded baseline carries the sha it was observed at, and the condition.** "check-state.sh
   exits 1" went stale the moment the user signed the approval — the signature itself changed the

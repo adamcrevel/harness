@@ -6,13 +6,13 @@ description: Run a harness team — a small DAG of agents hosted by a domain lea
 # Harness: Team Runner
 
 A team is a **DAG of steps, each dispatched to one agent**, hosted by a domain lead. This skill is
-the algorithm; the teams are data at `.claude/skills/harness/teams/*.yaml`.
+the algorithm; the teams are data at `.agents/skills/harness/teams/*.yaml`.
 
 **You are the host, and you are a lead.** You are running your own squad's DAG.
 
 **The orchestrator does not host teams and no longer preloads this skill** (issue #83). It was
 carried for flat mode — the orchestrator hosting a DAG itself — and flat mode is dead: `SPEC.md`
-records *"hierarchical works, the flat fallback is not needed"* (DEC-100, DEC-102), and
+records *"hierarchical works, the flat fallback is not needed"* (DEC-100, DEC-120), and
 `harness/SKILL.md` forbids the orchestrator→member path with no exceptions. The orchestrator
 sequences squad segments and delegates each to its lead; it reads this file by path only if it
 needs the algorithm. **The main session never hosts a team either** — since DEC-120 it is the user
@@ -33,9 +33,8 @@ outputs disjoint when steps run in parallel.
 
 ### 1. Resolve the team
 
-`.harness/teams/<name>.yaml` first, then `.claude/skills/harness/teams/<name>.yaml`. Project
-overrides win: the shipped directory is replaced wholesale on every `/harness-deploy`, so anything
-project-specific has to live outside it (DEC-113).
+`.harness/teams/<name>.yaml` first, then `.agents/skills/harness/teams/<name>.yaml`. Project
+overrides win, and anything project-specific has to live outside the shipped directory (DEC-113).
 
 **No team named?** List `name` + `purpose` from both directories and stop. The filesystem is the
 registry — there is no catalog to keep in sync.
@@ -43,25 +42,30 @@ registry — there is no catalog to keep in sync.
 ### 2. Open the run
 
 ```
-.harness/features/<feat>/runs/<YYYY-MM-DD>-<seq>-<squad>/
+.harness/harness/features/<feat>/runs/<YYYY-MM-DD>-<seq>-<squad>/
   state.yaml
 ```
 
-**The run dir is yours alone.** `state.yaml`, collected DIGESTs, nothing a member writes. Do not
-create per-step directories for members — they write into their own domains.
+**The run dir is yours alone.** `state.yaml`, collected DIGESTs, nothing a member writes. A Write
+to `<run_dir>/digest.md` is refused by `check-domain.sh` when it would discard existing content,
+so reusing another cycle's directory fails instead of destroying its record. Do not create
+per-step directories for members — they write into their own domains.
 
 Seed `state.yaml` with `schema_version`, `run_id`, `feature`, `squad`, `host`, `status: running`,
 and one `steps:` entry per team step with `status: pending`.
 
 **A team file carries EITHER a literal `steps:` DAG OR a `steps_from:` expansion rule.** With
 `steps_from:`, expand it into concrete steps FIRST, then seed exactly as above: read the source it
-names (`plan_tasks` = the `## Tasks` of `.harness/features/<feat>/PLAN.md`); take the task ids
+names (`plan_tasks` = `.harness/harness/features/<feat>/plan.yaml`'s `tasks:` list, loaded with
+`harness_yaml.load_plan`; a feature still on the pre-DEC-182 format uses `PLAN.md`'s `## Tasks`
+instead — the two never coexist, and `check-plan-routes.py` refuses a feature carrying both);
+take the task ids
 **the caller handed you** — WHICH tasks arrive is the orchestrator's decision, already made, and
 no key in the file re-states it; **route each one to a member by `consult-when`, which IS your
 decision**; take each step's prompt from the task's own
 `intent:` block when `prompt: from_task_intent`; build `depends_on` from each task's own
-`depends_on:` field when `depends_on: from_task_depends_on`, falling back to PLAN file order only
-for tasks declaring none — **PLAN file order is not a topological order**; substitute
+`depends_on:` field when `depends_on: from_task_depends_on`, falling back to file order only
+for tasks declaring none — **file order is not a topological order**; substitute
 `{{task_id}}`/`{{persona}}` into the `id` and `outputs` templates. From there the algorithm is
 unchanged. A task the caller did not hand you is **not** silently dropped: it stays for the
 orchestrator to sequence as its own squad segment (DEC-118).
@@ -78,6 +82,10 @@ name — record the *verdicts* they justify in the step entry, and the justifica
 
 Until every step is terminal, or you halt:
 
+This loop runs across turns, not inside one. Each wake re-enters it at the step `state.yaml`
+records, because your context may not survive the gap — `state.yaml` carries the loop's
+position, you do not.
+
 **a. Compute the ready set** — every `pending` step whose `depends_on` are all `complete`.
 
 **b. Checkpoint BEFORE dispatching.** Write `dispatched_at` into `state.yaml` *before* the spawn,
@@ -92,14 +100,16 @@ a time**, even when the DAG would allow parallelism. This is the actual write-sa
 `check-domain.sh` cannot see writes made through `Bash`, and every doer holds it (DEC-85). Do not
 treat a passing domain hook as proof that parallel writes are safe.
 
-**d. Dispatch the rest of the ready set in one turn** — **all `Agent` calls in a single message,
-never with a `name:` parameter** (teammate→teammate named spawns are rejected, DEC-147). One ready
-set is one checkpoint write, so `state.yaml` never describes a half-dispatched wave (DEC-124,
-DEC-100). Parallelism is implicit in the DAG: any two `pending` steps with satisfied `depends_on`
-and no mutual dependency go together. Caps: 20 concurrent, 200 per session, nested counting to both.
+**d. Dispatch the rest of the ready set in one turn** — **all task calls in one message, never
+with a `name:` parameter** (teammate→teammate named spawns are rejected, DEC-147). One ready set is
+one checkpoint write, so `state.yaml` never describes a half-dispatched wave (DEC-124, DEC-100).
+Parallelism is implicit in the DAG: any two `pending` steps with satisfied `depends_on` and no
+mutual dependency go together. Caps: 20 concurrent, 200 per session, nested counting to both.
 
-Title each dispatch `<flow-id> · <step or task id> · <what, 3–6 words>` (DEC-142). Each prompt
-carries the goal, the resolved **input paths**, the **output paths**, and nothing else.
+The first line of every item prompt is exactly
+`HARNESS-FEATURE: <FEAT-NN-slug|BUG-NN-slug>`. Put the human-readable title
+`<flow-id> · <step or task id> · <what, 3–6 words>` on the next line (DEC-142), then the goal,
+resolved **input paths**, and **output paths**.
 
 **Never pass `model:`** — `dispatch-guard.sh` blocks the call (DEC-152/155). A task that needs a
 stronger model is an escalation via `open_questions`.
@@ -107,7 +117,22 @@ stronger model is an escalation via `open_questions`.
 **Do not serialize out of caution.** Serial dispatch returns the same verdicts at several times the
 wall-clock, and nothing surfaces it. Genuine conflicts belong in `depends_on`/`mutates_repo`.
 
-**e. Collect returns.** Read `VERDICT` and the `DIGEST` fields and record both in `state.yaml`.
+**Under OMP, never supervise a member — the task tool does it.** Every member is declared
+`blocking: true`, so the ready-wave `task` call remains inside OMP until those members are terminal
+while your model is inactive. Do not call `hub wait`, poll `hub jobs`, sleep, emit heartbeats, or
+manufacture work. This blocking tool boundary is deliberate: a nested async parent is otherwise
+forced to submit `yield` while its child is still live, and OMP stops it after repeated refusals.
+
+**Under the Claude Code compatibility host, never wait for a member — end your turn.** That host
+returns launch metadata instead. End the turn immediately; its completion wakes you. The tool may
+tell you to continue other work in the meantime; this rule overrides that suggestion. A turn-end refusal naming
+children in flight is expected: end the turn again without making a claim about them, and expect
+the refusal to recur on each later wake while a child remains live (DEC-201).
+
+**e. Collect returns after the blocking task result or on waking under the compatibility host.** Re-read
+`state.yaml` first, verify the cited artifact, then record `VERDICT`, DIGEST fields, and
+`completed_at`. A repeated delivery after resume is an idempotent no-op, never a second dispatch or
+GitHub transition (DEC-204).
 
 **The digest contract is enforced for you**, mechanically — `validate-digest.py --hook` on
 `SubagentStop` (DEC-122). Route *on* the fields; do not re-adjudicate them. You would normalize
@@ -135,7 +160,7 @@ For `loop_back`:
 | **target** | re-dispatch the step whose `files_touched` produced the rejection — or the one `to:` names |
 | **`feed: [self]`** | inject the failing report's **path** into the re-dispatch, with the original inputs — without it the target repeats itself verbatim and cannot converge |
 | **counting** | per-step `cycles` in **your** `state.yaml`, written before re-dispatch, re-read each iteration — the loop is exactly where a context reset happens |
-| | never `feature.yaml` — those are the orchestrator's and the hook blocks you (DEC-119); report cycles in your digest instead |
+| | never `feature.json` — those are the orchestrator's and the hook blocks you (DEC-119); report cycles in your digest instead |
 | | cycles means **send-backs**: a clean first pass reports `0` (DEC-157). Counting runs is how a healthy feature exhausts its budget |
 | **downstream** | steps that ran after the target → `pending`; their verdicts are stale the moment their input changes |
 | **outputs** | resolve `{{cycle}}` in any path that re-runs, else cycle 2's PASS overwrites the evidence for why cycle 1 was spent (DEC-117) |
@@ -152,7 +177,7 @@ digest means the orchestrator paid your spawn for nothing. Four things, in order
 | | Do |
 |---|---|
 | **a. roll up** | `BLOCKED > ESCALATE > FAIL > PASS`, worst wins. One `FAIL` makes the team `FAIL`. `ESCALATE` outranks `FAIL` deliberately: a decision only the user can make must not hide behind a failure you could fix |
-| | every member entry carries a `verdict:` — the hook rejects a return claiming better than its members, and rejects outright if one is missing |
+| | every member that ran carries `verdict:`. Only the optional external `fable-advisor` may carry `status: skipped`, plus the host reason, when it did not run. Skips do not enter worst-wins, but at least one member must have run |
 | | reporting **worse** than your members is allowed — you may see what they could not |
 | **b. merge** | union `must_fix`, `files_touched`, `open_questions`; merge one defect reported three ways into one entry naming all three reporters, else three copies spend three fix cycles on one problem |
 | | re-rank `low`/`info` against **what the project does next** — you are the only tier that sees priority, so an inert `info` intersecting the next task outranks a `med` that does not (DEC-124) |
@@ -212,6 +237,7 @@ DIGEST:
   cycles_used: <n>
   members:                                   # per-member roll-up — NOT optional
     - { step: <id>, persona: <p>, verdict: <v>, headline: "...", files_touched: [...] }
+    - { step: should-not-exist, persona: fable-advisor, status: skipped, reason: "<host reason>" } # only optional external member
   must_fix: [<union of blocking findings>]
   files_touched: [<union across members>]    # universal — required of you too; [] if none
   branch: <branch | none>                    # `none` if the team mutated no repo
@@ -236,3 +262,4 @@ artifact: <run_dir>/digest.md                # your collated report — NOT stat
 | "I'll dispatch these one at a time to be safe" | Independent, non-mutating steps go in one turn. Serial dispatch wastes the fan-out |
 | "I'll write state.yaml at the end" | Checkpoint before dispatch, or a crash leaves an undecidable run |
 | "I'll record my assessment reasoning in state.yaml so it survives" | Prose survives in `digest.md`. state.yaml carries verdicts and markers a fresh context can match, not read (DEC-154) |
+| "I'll reuse last cycle's run dir" | The digest write is refused rather than overwritten; a new cycle takes a run directory of its own |

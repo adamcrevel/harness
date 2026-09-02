@@ -1,0 +1,33 @@
+schema: factory-fleet/1
+# THIS FILE IS THE FLEET DECLARATION AND NOTHING ELSE (FEAT-24): which repositories the
+# factory serves, where their checkouts go, and what branch they are cut from. A board
+# declared here at ANY level — top-level or inside a repos entry — is REJECTED by load_fleet,
+# because each repository's board lives in that repository's own `.harness/harness.json`.
+#
+# `default_branch` stays because `factory_workspace` reads it in order to CREATE the checkout,
+# so it cannot live inside the checkout.
+#
+# mruangutai/harness is DELIBERATELY ABSENT (DEC-174). Harness develops itself in the
+# live checkout and in worktrees under it — both sit INSIDE the repository root, resolve in
+# the harness base, and keep full write rights.
+#
+# The absence is what enforces it, and the mechanism CHANGED when the entry came out.
+# Measured both ways on `harness-factories/harness/.claude/skills/harness/bin/check-domain.sh`:
+# with the entry present, `--resolve` returned NOBODY (product base, control-plane globs
+# filtered); with it absent, `--resolve` exits 2 — "under the factory workspace but belongs
+# to no repository declared in fleet.yaml". Louder, not quieter. Re-adding the entry is a
+# decision, not a convenience.
+repos:
+  - name: mruangutai/kaya-ai
+    default_branch: master
+    # kaya-ai's board and the rationale for its station choices live in kaya-ai's own
+    # `.harness/harness.json` on `master`. Not restated here — one statement, one home.
+  - name: mruangutai/harness-factory-smoke
+    default_branch: main
+    # A KEPT FIXTURE, not a served product. It exists so the board-lifecycle tooling can be
+    # exercised against the real GitHub API on a repository that is not the harness itself and
+    # not a live product — FEAT-33 SC-01's create path in particular, which no runner can reach
+    # (`provision`'s create branch only fires when the declared project number does not exist,
+    # and no fake can prove GitHub accepts the mutation). Its board and stations live in its own
+    # `.harness/harness.json` on `main`, like every other member's.
+workspace_root: /Users/molchairuangutai/GitHub/harness-factories

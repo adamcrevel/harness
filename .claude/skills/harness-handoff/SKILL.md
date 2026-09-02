@@ -47,6 +47,16 @@ violation becomes `BLOCKED (contract violation)`.
 
 **Never invent a verdict.** If you cannot determine one, return `BLOCKED` and say why.
 
+## Runtime handoff
+
+The host supervises every dispatch. Under OMP, the outer orchestrator is background-dispatched and
+wakes the main session through a terminal async result; nested leads and members are
+`blocking: true`, so their parent model is inactive inside the task tool until the child is
+terminal. Neither route permits shell supervision, sleeps, `hub wait`, or repeated status calls.
+After the tool result or wake, re-read the durable checkpoint and verify the cited artifact before
+accepting a verdict. `yield` is the terminal Harness handoff; `agent_end` is notification-only.
+Claude Code keeps its measured end-turn/wake compatibility rule (DEC-201/204).
+
 ## Writing the artifact
 
 - **BLUF.** Lead with the conclusion or recommendation. Not "I explored X, then Y."
@@ -58,19 +68,16 @@ violation becomes `BLOCKED (contract violation)`.
 Your artifact is read by the *consumer* of your work. The orchestrator reads only your VERDICT and
 DIGEST, so anything the routing decision depends on must be in the DIGEST, not buried in the artifact.
 
-**Your artifact is gated too.** `check-docs.sh` scans **every `.md` file under `.harness/`** — not
-just the project's docs — so a superseded phrase you write into a brief, plan, note or digest fails
-the gate exactly like one in `SPEC.md`. Two consequences worth knowing before you write:
+**Where your artifact goes — check your own domain FIRST, and use what you already own.** Most
+personas hold a per-feature `notes/` path named for their role: pm writes `notes/research-*.md` or
+`notes/uat-*.md`, qa writes `notes/qa-*.md`, each reviewer writes `notes/review-<self>-*.md`, the
+visual designer writes under `notes/mockups/` or `notes/prototypes/`. **If you own such a path, your
+artifact goes there and you write no receipt.** A dispatch that names a receipt path for you does not
+override this — the guard will deny it, correctly (#216).
 
-- **Quoting stale wording is legitimate; it just has to mark itself.** Put `<!-- ok-stale -->` on
-  that line. The escape is **per line, not per file** — a phrase you quote three times needs it three
-  times, and the checker now lists every location of a pattern in one report so you can fix them all
-  in one pass.
-- **Run dirs are exempt** — `runs/**` is history and is never scanned. Live feature docs are not.
-
-**Where your artifact goes.** If your deliverable is code or a verification result and you have no
-other per-feature path, write the receipt to
-`.harness/features/<FEAT>/notes/receipt-<your-agent-name>-<runid>.md`. **Not your observations log.**
+The receipt is the fallback for the personas that own no other per-feature path — the five engineers
+and the documentor. Only those six write
+`.harness/harness/features/<FEAT>/notes/receipt-<your-agent-name>-<runid>.md`. **Not your observations log.**
 That log is the Expertise hot layer — it is never injected into any spawn, so anything a successor
 must read is lost there. Use it only for lessons about *how you work*.
 
@@ -81,6 +88,8 @@ must read is lost there. Use it only for lessons about *how you work*.
 | cheap and reversible — naming, local structure, test shape | **decide.** Record it in the DIGEST |
 | expensive or hard to reverse — schema, API contract, new dependency | **ask** via `open_questions` |
 | changes scope, the goal, or an approved decision | **always ask.** It is not yours |
+
+**One act is never yours, whatever the table says: removing a worktree.** It belongs to the main session or the `post-merge` hook, from OUTSIDE the tree — because `git worktree remove` exits 0 when run from INSIDE the tree it deletes, so an agent following an instruction to remove its own worktree destroys its working directory mid-run.
 
 You are not blocked while a question is outstanding: raise it, do what you can, and return. A member
 never waits on a human — questions travel up and answers come back down.

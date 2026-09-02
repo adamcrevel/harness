@@ -13,8 +13,12 @@ Memory has **two layers**, and confusing them is the failure this skill exists t
 
 | Layer | File | Written | Injected at spawn |
 |---|---|---|---|
-| **Observations** — hot, granular, this feature | `.harness/features/<FEAT>/observations/<your-agent-name>.md` | by you, mid-run, freely | **never** |
-| **Expertise** — cold, rule-form, durable | `.harness/expertise/<your-agent-name>.md` | only under a **distillation dispatch** | every spawn |
+| **Observations** — hot, granular, this feature | `.harness/harness/features/<FEAT>/observations/<your-agent-name>.md` | by you, mid-run, freely | **never** |
+| **Expertise, craft** — how you work, anywhere | `.harness/expertise/<your-agent-name>.md` | only under a **distillation dispatch** | every spawn |
+| **Expertise, repository** — true of ONE repo | `.harness/<repo>/expertise/<your-agent-name>.md` | only under a **distillation dispatch** | every spawn |
+
+Craft is the default: **could this be true and useful in a repository you have never seen?** If yes,
+it is craft. The full rule is in `harness-distill`, which you read when you are told to distill.
 
 Why the split: mid-run-written Expertise bloated into incident narrative that taxed every spawn
 (DEC-145). Mid-run you only *observe*; distillation happens later, cold.
@@ -23,8 +27,17 @@ Why the split: mid-run-written Expertise bloated into incident narrative that ta
 
 Learned something that might matter later? APPEND it to your observations log — one dated bullet,
 as granular as you like: feature IDs, line anchors, incident narrative, all welcome. It is never
-injected, so detail is free. Create the file on first use; `Write`-not-`Edit` means appending is read-modify-write — Read the
-log first if it exists.
+injected, so detail is free. **Do not Read-then-Write the log.** That instruction WAS issue
+#606: two contexts of one agent each read, each write whole, and the second erases the first.
+Append through the merge tool instead — it merges under a lock and replaces atomically, so
+both contexts keep their bullets:
+
+```bash
+python3 .agents/skills/harness/bin/observations-merge.py apply \
+  --file .harness/<repo>/features/<FEAT>/observations/<your-agent-name>.md --entries -
+```
+
+Entries arrive on stdin in the same bullet format the log already uses.
 
 ```markdown
 # Observations — <your-agent-name> — <FEAT>
@@ -41,7 +54,7 @@ its own record.
 
 | It is | Goes to |
 |---|---|
-| **A choice** — "we'll use Postgres", "the API returns 202 not 200" | `PLAN.md ## Decisions`. **Approval-gated. Not yours** |
+| **A choice** — "we'll use Postgres", "the API returns 202 not 200" | `plan.yaml`'s `decisions:` (`PLAN.md ## Decisions` on the pre-DEC-182 format). **Approval-gated. Not yours** |
 | **An observation** — "migrations fail if run before the seed script" | Your observations log |
 | **A harness defect** — a hook that didn't fire, a validator that passed garbage, a rule that backfired | `open_questions` in your DIGEST, so it reaches the harness owner. **Never Expertise** — a bug report ages into a stale workaround the moment the bug is fixed |
 
@@ -55,7 +68,7 @@ Those rules — the procedure, the entry format, the ops schema, the caps — ar
 (DEC-158): they governed ~33 spawns per feature that never write the file.
 
 **When your dispatch says "distill", read
-`.claude/skills/harness-distill/SKILL.md` first.** Until then the only thing you need to know is
+`.agents/skills/harness-distill/SKILL.md` first.** Until then the only thing you need to know is
 that you do not touch `.harness/expertise/<your-agent-name>.md`.
 
 ## Red flags

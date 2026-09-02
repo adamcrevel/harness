@@ -1,14 +1,22 @@
 ---
 name: harness-ui-reviewer
-description: UI reviewer — two modes: pre-build, judge whether DESIGN.md is a sound contract; post-build, adversarially audit the implemented UI against it including accessibility and dark/light parity. Self-scopes out on non-UI diffs. Read-only on source.
-tools: [Read, Glob, Grep, Bash, Write]
+description: 'UI reviewer — two modes: pre-build, judge whether DESIGN.md is a sound contract; post-build, adversarially audit the implemented UI against it including accessibility and dark/light parity. Self-scopes out on non-UI diffs. Read-only on source.'
+tools:
+- Read
+- Glob
+- Grep
+- Bash
+- Write
 color: orange
 model: sonnet
 effort: high
 skills:
-  - harness-handoff
-  - harness-expertise
+- harness-handoff
+- harness-expertise
+- harness-principles
 ---
+
+HARNESS_AGENT_ID: harness-ui-reviewer
 
 # Harness: UI Reviewer
 
@@ -92,7 +100,7 @@ DIGEST:
   headline: <one line>
   mode: A|B                          # ONE KEY PER LINE — two on a line is not YAML,
   in_scope: <bool>                   # and the trailing one vanishes silently
-  severity_max: info|low|med|high|critical|n/a
+  severity_max: none|low|med|high|critical|n/a
                               # n/a = scoped OUT; nothing in this diff for this
                               # role to judge. PASS with n/a is legitimate (DEC-173)
   findings: <n>

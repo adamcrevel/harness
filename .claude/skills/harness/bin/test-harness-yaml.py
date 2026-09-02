@@ -17,9 +17,9 @@ BIN_DIR = os.path.dirname(os.path.realpath(__file__))
 if BIN_DIR not in sys.path:
     sys.path.insert(0, BIN_DIR)
 
-# Repo root: four levels above .claude/skills/harness/bin. CLAUDE_PROJECT_DIR
+# Repo root: four levels above .agents/skills/harness/bin. CLAUDE_PROJECT_DIR
 # overrides when the caller has already resolved it (run-unit-tests.sh does).
-REPO_ROOT = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.abspath(
+REPO_ROOT = (os.environ.get("HARNESS_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR")) or os.path.abspath(
     os.path.join(BIN_DIR, "..", "..", "..", "..")
 )
 MANIFEST_PATH = os.path.join(REPO_ROOT, ".harness", "team-config.yaml")
@@ -33,11 +33,10 @@ COLLECT_FIXTURE = {
         [
             "src/**",
             ".claude/skills/harness/bin/**",
-            ".harness/codebase/api-surface.md",
-            ".harness/codebase/domains/**",
-            ".harness/features/*/notes/receipt-harness-backend-dev-*.md",
+            ".harness/*/features/*/notes/receipt-harness-backend-dev-*.md",
             ".harness/expertise/harness-backend-dev.md",
-            ".harness/features/*/observations/harness-backend-dev.md",
+            ".harness/*/expertise/harness-backend-dev.md",
+            ".harness/*/features/*/observations/harness-backend-dev.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -50,10 +49,10 @@ COLLECT_FIXTURE = {
             "Dockerfile",
             ".harness/harness.json",
             ".claude/skills/harness/bin/**",
-            ".harness/codebase/stack.md",
-            ".harness/features/*/notes/receipt-harness-dev-ops-*.md",
+            ".harness/*/features/*/notes/receipt-harness-dev-ops-*.md",
             ".harness/expertise/harness-dev-ops.md",
-            ".harness/features/*/observations/harness-dev-ops.md",
+            ".harness/*/expertise/harness-dev-ops.md",
+            ".harness/*/features/*/observations/harness-dev-ops.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -62,15 +61,16 @@ COLLECT_FIXTURE = {
     ),
     "harness-pm": (
         [
-            ".harness/features/*/BRIEF.md",
-            ".harness/features/*/PLAN.md",
-            ".harness/features/*/notes/research-*.md",
+            ".harness/*/features/*/BRIEF.md",
+            ".harness/*/features/*/PLAN.md",
+        ".harness/*/features/*/plan.yaml",
+            ".harness/*/features/*/notes/research-*.md",
             ".harness/notes/research-*.md",
-            ".harness/features/*/notes/uat-*.md",
-            ".harness/codebase/product-surface.md",
-            ".harness/codebase/glossary.md",
+            ".harness/*/features/*/notes/uat-*.md",
+            ".harness/glossary.md",
             ".harness/expertise/harness-pm.md",
-            ".harness/features/*/observations/harness-pm.md",
+            ".harness/*/expertise/harness-pm.md",
+            ".harness/*/features/*/observations/harness-pm.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -80,12 +80,13 @@ COLLECT_FIXTURE = {
     "harness-documentor": (
         [
             "docs/**",
+            ".harness/*/docs/**",
             "README.md",
             ".harness/README.md",
-            ".harness/codebase/INDEX.md",
-            ".harness/codebase/architecture.md",
+            ".harness/*/features/*/notes/receipt-harness-documentor-*.md",
             ".harness/expertise/harness-documentor.md",
-            ".harness/features/*/observations/harness-documentor.md",
+            ".harness/*/expertise/harness-documentor.md",
+            ".harness/*/features/*/observations/harness-documentor.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -100,9 +101,14 @@ COLLECT_FIXTURE = {
     # about nesting, so it must not either.
     "harness-eng-lead": (
         [
-            ".harness/features/*/runs/*-eng/**",
+            ".harness/*/features/*/runs/*-eng/**",
             ".harness/expertise/harness-eng-lead.md",
-            ".harness/features/*/observations/harness-eng-lead.md",
+            ".harness/*/expertise/harness-eng-lead.md",
+            ".harness/*/features/*/observations/harness-eng-lead.md",
+            # 2026-08-26: standalone team analysis, granted to all three leads
+            # because a lead dispatched OUTSIDE a feature has no run directory
+            # to write into and its 41-minute report had nowhere to land.
+            ".harness/notes/analysis-*.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -111,11 +117,12 @@ COLLECT_FIXTURE = {
     ),
     "harness-orchestrator": (
         [
-            ".harness/features/**",
-            ".harness/features/*/notes/answers-*.md",
-            ".harness/features/*/notes/ship-review-*.md",
+            ".harness/*/features/**",
+            ".harness/*/features/*/notes/answers-*.md",
+            ".harness/*/features/*/notes/ship-review-*.md",
             ".harness/expertise/harness-orchestrator.md",
-            ".harness/features/*/observations/harness-orchestrator.md",
+            ".harness/*/expertise/harness-orchestrator.md",
+            ".harness/*/features/*/observations/harness-orchestrator.md",
         ],
         [
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -262,26 +269,34 @@ def test_bootstrap_marker_lifecycle():
 def test_marker_self_unlinks_when_yaml_imports():
     """require_or_die() unlinks an existing marker and returns normally when
     yaml is importable. A bare `import harness_yaml` must NOT touch the marker
-    — the module's only import-time behaviour is the single `import yaml`."""
+    — the module's only import-time behaviour is the single `import yaml`.
+
+    require_or_die()'s root comes from harness_boundary.resolve_root(_BIN_DIR)
+    (FEAT-42 T-05), which reads HARNESS_PROJECT_DIR only and requires the override
+    to carry team-config.yaml (MARKER) — the retired CLAUDE_PROJECT_DIR no longer
+    redirects it at all."""
     import harness_yaml as hy
 
     with tempfile.TemporaryDirectory() as tmp:
         harness_dir = os.path.join(tmp, ".harness")
         os.makedirs(harness_dir, exist_ok=True)
         marker = os.path.join(harness_dir, ".pyyaml-bootstrap")
+        with open(os.path.join(harness_dir, "team-config.yaml"), "w", encoding="utf-8") as f:
+            f.write("")  # MARKER, required for HARNESS_PROJECT_DIR to be honoured
 
         with open(marker, "w", encoding="utf-8") as f:
             f.write("sess-A")
 
-        orig_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-        os.environ["CLAUDE_PROJECT_DIR"] = tmp
+        orig_project_dir = os.environ.get("HARNESS_PROJECT_DIR")
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        os.environ["HARNESS_PROJECT_DIR"] = tmp
         try:
             hy.require_or_die()  # yaml is importable in this environment (T-01)
         finally:
             if orig_project_dir is None:
-                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                os.environ.pop("HARNESS_PROJECT_DIR", None)
             else:
-                os.environ["CLAUDE_PROJECT_DIR"] = orig_project_dir
+                os.environ["HARNESS_PROJECT_DIR"] = orig_project_dir
         assert not os.path.exists(marker), "require_or_die() must unlink the marker"
 
         # Recreate the marker; a bare import (no require_or_die/require_or_bootstrap
@@ -289,7 +304,8 @@ def test_marker_self_unlinks_when_yaml_imports():
         with open(marker, "w", encoding="utf-8") as f:
             f.write("sess-A")
         env = dict(os.environ)
-        env["CLAUDE_PROJECT_DIR"] = tmp
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env["HARNESS_PROJECT_DIR"] = tmp
         subprocess.run(
             [sys.executable, "-c", "import harness_yaml"],
             cwd=BIN_DIR, env=env, check=True,
@@ -297,13 +313,95 @@ def test_marker_self_unlinks_when_yaml_imports():
         assert os.path.exists(marker), "a bare import must not unlink the marker"
 
 
+def test_require_or_die_ignores_the_retired_project_dir_variable():
+    """CLAUDE_PROJECT_DIR alone must not redirect require_or_die()'s root — only
+    HARNESS_PROJECT_DIR does (FEAT-42 T-05). Proven by pointing CLAUDE_PROJECT_DIR at
+    a tmp tree carrying a stale marker and confirming that marker is left untouched
+    — require_or_die() fell through to the real repo root instead, exactly as
+    harness_boundary.resolve_root's contract requires."""
+    import harness_yaml as hy
+
+    with tempfile.TemporaryDirectory() as tmp:
+        harness_dir = os.path.join(tmp, ".harness")
+        os.makedirs(harness_dir, exist_ok=True)
+        marker = os.path.join(harness_dir, ".pyyaml-bootstrap")
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("sess-A")
+
+        orig_claude = os.environ.get("CLAUDE_PROJECT_DIR")
+        orig_harness = os.environ.get("HARNESS_PROJECT_DIR")
+        os.environ.pop("HARNESS_PROJECT_DIR", None)
+        os.environ["CLAUDE_PROJECT_DIR"] = tmp
+        try:
+            hy.require_or_die()
+        finally:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            if orig_claude is not None:
+                os.environ["CLAUDE_PROJECT_DIR"] = orig_claude
+            if orig_harness is not None:
+                os.environ["HARNESS_PROJECT_DIR"] = orig_harness
+        assert os.path.exists(marker), (
+            "CLAUDE_PROJECT_DIR redirected require_or_die()'s root — it must be inert"
+        )
+
+
+def test_require_or_die_survives_a_missing_harness_boundary():
+    """require_or_die()'s root-resolution is used for exactly one thing: best-effort
+    unlink of the PyYAML bootstrap marker (`_marker_path`, reached only inside
+    `if yaml is not None:`). That cleanup must not be able to abort every caller of
+    require_or_die() — including check-state.sh, the canonical pre-commit state
+    checker — when harness_boundary.py (a DIFFERENT module) is missing or its
+    resolve_root() raises.
+
+    Regression: FEAT-42 T-05 added a lazy `import harness_boundary` inside
+    require_or_die(). In an isolated bin/ carrying only harness_yaml.py (no
+    harness_boundary.py — check-state.sh's own u.7/x.5 fixtures build exactly this),
+    that import raised ModuleNotFoundError UNCAUGHT, so require_or_die() crashed with
+    a raw traceback and exit 1 instead of returning normally — exit 1 is
+    NON-BLOCKING, and worse, check-state.sh never reached its own later, PROPERLY
+    guarded INV-25/INV-27 checks at all. Fail-open, same class as the module-level
+    import T-05 already fixed for bash-write-guard.sh/check-domain.sh, one caller
+    later."""
+    import shutil
+
+    with tempfile.TemporaryDirectory() as tmp:
+        isobin = os.path.join(tmp, "bin")
+        os.makedirs(isobin)
+        shutil.copy(os.path.join(BIN_DIR, "harness_yaml.py"),
+                    os.path.join(isobin, "harness_yaml.py"))
+        # Deliberately NO harness_boundary.py in isobin.
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env.pop("HARNESS_PROJECT_DIR", None)
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import harness_yaml; harness_yaml.require_or_die(); print('OK')"],
+            cwd=isobin, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0 and r.stdout.strip() == "OK", (
+            f"require_or_die() must survive a missing harness_boundary.py, not crash "
+            f"before its caller's own guarded checks ever run: exit {r.returncode}, "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}"
+        )
+
+
 def test_exactly_one_guarded_import_in_the_tree():
-    """D-12's receipt as a standing test: exactly one `except ImportError` in
-    the whole bin/ tree, and it lives in harness_yaml.py. The needle is
-    assembled at runtime and test-*.py files are excluded from the scan, so
-    this test file can never self-match (it lives in bin/ too)."""
+    """Two-assertion rule replacing the old single exact-set check.
+
+    D-12 (PLAN.md:229) is scoped to `import yaml`, not to guarded imports in
+    general — a guard on some other dependency (e.g. jsonschema, D-04) violates
+    no signed decision. The old single assertion widened D-12's scope by
+    accident: it treated ANY guarded import anywhere in bin/ as equivalent to a
+    yaml fallback. Splitting into two assertions restores D-12 to its actual
+    scope at full strength while still capping the general pattern.
+
+    The needle is assembled at runtime and test-*.py files are excluded from
+    the scan, so this test file can never self-match (it lives in bin/ too).
+    """
     needle = "except" + " " + "ImportError"
-    hits = []
+    yaml_tokens = ("import yaml", "from yaml")
+    guarded_hits = []       # any file with the `except ImportError` needle
+    yaml_guarded_hits = []  # subset: needle AND a yaml import token, same file
     for name in sorted(os.listdir(BIN_DIR)):
         if name.startswith("test-"):
             continue
@@ -314,9 +412,53 @@ def test_exactly_one_guarded_import_in_the_tree():
             text = open(path, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError):
             continue
-        if needle in text:
-            hits.append(name)
-    assert set(hits) == {"harness_yaml.py"}, f"expected only harness_yaml.py, got {hits!r}"
+        if needle not in text:
+            continue
+        guarded_hits.append(name)
+        # Substring check is safe here: "import yaml" is NOT a substring of
+        # "import harness_yaml" (verified) because "import " is followed
+        # immediately by "yaml" only in the former — there is no leading
+        # space collapse that would make "harness_yaml" match. Do not
+        # "simplify" this into a bare `"yaml" in text` check — that WOULD
+        # false-positive on `import harness_yaml`.
+        if any(tok in text for tok in yaml_tokens):
+            yaml_guarded_hits.append(name)
+
+    # Assertion 1 — D-12 at full strength, restored to its real scope: a
+    # guarded YAML import (needle + yaml token co-occurring in the SAME file)
+    # exists in exactly one file. This must stay `==`, not a subset — D-12
+    # forbids a second yaml fallback path from ever landing unnoticed.
+    # factory_decompose.py has a real, unguarded `import yaml` today; wrapping
+    # it in a guard would trip this assertion, and that failing loud is
+    # correct — do not weaken this assertion to accommodate that file.
+    assert set(yaml_guarded_hits) == {"harness_yaml.py"}, (
+        f"expected only harness_yaml.py to guard a yaml import, got {yaml_guarded_hits!r}"
+    )
+
+    # Assertion 2 — the generalised anti-fallback rule: one guarded import per
+    # required dependency, each living in the module whose job IS that
+    # dependency's policy. FEAT-14 (D-04) added jsonschema as a second
+    # required dependency, so feature_schema.py is now allowed alongside
+    # harness_yaml.py. check-domain.sh is T-06's tight try around
+    # `import feature_schema` — T-06 is main-session-direct and lands AFTER
+    # this fix, so it holds zero occurrences of the needle right now. This
+    # MUST be a subset (`<=`), never `==`: an equality assertion sized to all
+    # three fails immediately (check-domain.sh is empty today), and one sized
+    # to today's two goes red the moment T-06 lands with nothing driving it.
+    # Subset is what spans that window without losing the cap.
+    # feature-worktree.py added 2026-08-20 by operator ruling (FEAT-30 Q1). T-01's SIGNED
+    # intent required it: "import harness_boundary lazily and, if the import fails, exit 2
+    # with a message naming the module." It guards a FIRST-PARTY sibling, which is the same
+    # category check-domain.sh is already allowed for — not a fourth third-party fallback,
+    # which is what this cap exists to prevent. The alternative considered and rejected was
+    # dropping the guard: it breaks no test today, because NOTHING exercises the guarded
+    # branch, but it departs from signed text to buy nothing.
+    allowed = {"harness_yaml.py", "feature_schema.py", "check-domain.sh",
+               "feature-worktree.py"}
+    assert set(guarded_hits) <= allowed, (
+        f"unexpected guarded-import file(s) outside the allowed set: "
+        f"{set(guarded_hits) - allowed!r}"
+    )
 
 
 def test_missing_pyyaml_is_reportable_not_a_second_crash():
@@ -454,6 +596,269 @@ def test_c_loader_is_used_when_libyaml_is_available():
         assert e.mark is not None and e.mark.line >= 0, "line/column lost under this loader"
 
 
+GOOD_PLAN = """schema: plan/1
+feature: FEAT-TEST
+approval:
+  status: approved
+tasks:
+  - id: T-01
+    title: do the thing
+    change_type: logic
+    execution_mode: main-session-direct
+    execution_reason: carve-out
+    traces: [REQ-01]
+    depends_on: []
+    status: pending
+    files:
+      - src/a.py
+      - src/b.py
+    verify: |
+      python3 -m pytest
+    intent: |
+      Do the thing, carefully.
+"""
+
+
+def _plan(tmp, text):
+    p = os.path.join(tmp, "plan.yaml")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
+    return p
+
+
+def test_load_plan_accepts_a_well_formed_plan():
+    """The discriminator. Every rejection case below passes against a load_plan that
+    rejects everything, so one acceptance case is what makes them mean anything."""
+    import harness_yaml as hy
+
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = hy.load_plan(_plan(tmp, GOOD_PLAN))
+        assert doc["tasks"][0]["files"] == ["src/a.py", "src/b.py"], doc["tasks"][0]["files"]
+        assert doc["tasks"][0]["verify"] == "python3 -m pytest\n", repr(doc["tasks"][0]["verify"])
+
+
+def test_every_required_task_field_is_actually_required():
+    """EVERY entry in REQUIRED_TASK_FIELDS, generated FROM the tuple.
+
+    Review found `intent:` had been added to REQUIRED_TASK_FIELDS with no test at all:
+    dropping it back out left all three suites green. A fixture that CARRIES a field
+    cannot assert the field is required — `case_23j`'s 12-line `intent:` pins that intent
+    stays OUT of the budget, which is a different claim.
+
+    Generated from the tuple rather than listed, so a field added to production and not
+    to a list here cannot go unexercised. There is no list to forget.
+    """
+    # Imported HERE, not at module scope: this file deliberately has no top-level
+    # `import yaml`, because test_missing_pyyaml_is_reportable_not_a_second_crash
+    # exercises the absent-parser path.
+    import yaml
+    import harness_yaml as hy
+
+    # PIN THE TUPLE'S CONTENTS FIRST. A loop generated from REQUIRED_TASK_FIELDS cannot
+    # notice a field being removed FROM it — the loop just stops testing that field and
+    # stays green. Measured: dropping "intent" back out left this test passing until this
+    # assertion existed. Generation protects against a field ADDED and untested; only an
+    # explicit set protects against one DELETED.
+    assert set(hy.REQUIRED_TASK_FIELDS) == {
+        "id", "title", "change_type", "execution_mode", "files", "verify", "intent"
+    }, (f"REQUIRED_TASK_FIELDS changed to {hy.REQUIRED_TASK_FIELDS}. If that is "
+        f"deliberate, update this set and say why in the commit — `intent:` in "
+        f"particular is what teams/build.yaml dispatches on.")
+    for field in hy.REQUIRED_TASK_FIELDS:
+        doc = yaml.safe_load(GOOD_PLAN)
+        del doc["tasks"][0][field]
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                hy.load_plan(_plan(tmp, yaml.safe_dump(doc)))
+            except hy.PlanSchemaError as e:
+                assert field in str(e), (
+                    f"omitting {field!r} raised, but the message does not name it: {e}")
+            else:
+                raise AssertionError(
+                    f"a plan with no {field!r} loaded CLEAN — it is in "
+                    f"REQUIRED_TASK_FIELDS but nothing enforces it")
+
+
+def test_load_plan_accepts_a_station_only_record_and_only_with_a_station():
+    """FEAT-41 T-19, operator-directed after cycle 2's C2-01.
+
+    EVERY FEATURE MUST HAVE A plan.yaml, because the one-record rule needs somewhere to write.
+    Thirteen directories have none -- they predate the format or were opened as bug fixes -- and
+    for those the honest record is a station and no tasks. Inventing tasks to satisfy the schema
+    would be fabrication.
+
+    THE ORIGINAL REJECTION IS NOT BLANKET-RELAXED, and its reason is respected rather than
+    overruled. It read: "A plan with no tasks is not a plan. Silence here would be the same
+    fail-open B-7 was: a checker reporting a clean tree it never looked at." That risk is real for
+    an ACCIDENTALLY empty plan. It does not apply to an explicit `tasks: []` that also declares a
+    top-level `status:`, because such a file carries a checkable fact and cannot be the product of
+    silence -- an accidentally empty plan has neither key.
+
+    So the line is drawn between a positive declaration and an absence, and BOTH sides are
+    asserted here: with a station it loads, without one it still raises.
+    """
+    import harness_yaml as hy
+
+    station_only = ("schema: plan/1\nfeature: BUG-99-x\nstatus: review\n"
+                    "station_only: true\ntasks: []\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = hy.load_plan(_plan(tmp, station_only))
+        assert doc["tasks"] == [], doc["tasks"]
+        assert doc["status"] == "review", doc["status"]
+        assert doc["station_only"] is True, doc["station_only"]
+
+    # THE NEGATIVE HALF, and it is the one that keeps the original reason intact: an empty task
+    # list with NO station is still the fail-open the message warned about.
+    for label, text in (
+        ("empty tasks and no status", "schema: plan/1\nfeature: BUG-99-x\ntasks: []\n"),
+        # FEAT-41 MF-3, high. THE EXEMPTION MUST KEY ON A POSITIVE DECLARATION, not on the
+        # ABSENCE of tasks. Cycle 3 proved end to end that a Bash write could empty a SIGNED
+        # plan's `tasks:` while keeping its `approval:` and `status:`, and the emptied document
+        # then inherited the station-only exemption -- a real dangling-task violation went
+        # SILENT. An emptied plan carries no `station_only:` marker, so it now fails to LOAD,
+        # which is a louder outcome than the check it was escaping.
+        ("empty tasks, a status, but NO station_only marker",
+         "schema: plan/1\nfeature: BUG-99-x\nstatus: review\ntasks: []\n"),
+        ("empty tasks and station_only false",
+         "schema: plan/1\nfeature: BUG-99-x\nstatus: review\nstation_only: false\ntasks: []\n"),
+        ("empty tasks and a blank status",
+         "schema: plan/1\nfeature: BUG-99-x\nstatus: '   '\ntasks: []\n"),
+        ("tasks absent entirely", "schema: plan/1\nfeature: BUG-99-x\nstatus: review\n"),
+        ("tasks not a list",
+         "schema: plan/1\nfeature: BUG-99-x\nstatus: review\ntasks: nope\n"),
+        # FEAT-41 HIGH-1, cycle 4, found independently by two reviewers. THE MARKER WAS VALIDATED
+        # IN ONE DIRECTION ONLY: empty tasks => marker required, never marker => tasks must be
+        # empty. So the credential could be MINTED onto a task-bearing signed plan -- through the
+        # ungated `apply` verb or a raw Bash write -- and it durably silenced the approval and
+        # STATE.md-task checks for that feature.
+        #
+        # MF-3 replaced "an absence cannot be a credential" with a FORGEABLE one, which is the
+        # same mistake wearing the opposite sign. A credential has to be checked BOTH ways: it
+        # must be present when claimed, and it must not be claimable when false.
+        ("station_only marker on a plan that HAS tasks",
+         "schema: plan/1\nfeature: BUG-99-x\nstatus: review\nstation_only: true\n"
+         "tasks:\n  - id: T-01\n    title: t\n    change_type: logic\n"
+         "    execution_mode: main-session-direct\n    status: done\n    files: [a.py]\n"
+         "    verify: run it\n    intent: do it\n"),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                hy.load_plan(_plan(tmp, text))
+            except hy.PlanSchemaError:
+                pass
+            else:
+                raise AssertionError(f"ACCEPTED what it must reject: {label}")
+
+
+def test_load_plan_rejects_the_shapes_that_broke_PLAN_md():
+    """The three failures issue #147 was filed about, now unrepresentable.
+
+    Measured on the pre-change tree: `safe_load` fails on 35 of the 36 task blocks in
+    the four live plans. 26 carry a `files:` that begins with a backtick — markdown
+    decoration inside a data field — and one of those 26 is ALSO `execution_mode:
+    **SPLIT`, which YAML reads as an alias; it is the same block, not a 27th. The
+    other 9 put a second `": "` inside a plain scalar via `execution_mode: <mode> —
+    reason: ...`.
+
+    The cases below are NOT a census of those 35. Two are drawn from the corpus; the
+    rest are shapes the loader must also refuse. Each must raise a YamlParseError
+    subclass rather than silently resolving something nobody wrote.
+    """
+    import harness_yaml as hy
+
+    cases = {
+        "backticked files value (the 26-case class)":
+            GOOD_PLAN.replace("      - src/a.py", "      - `src/a.py`"),
+        "bolded execution_mode (FEAT-08 T-04's **SPLIT)":
+            GOOD_PLAN.replace("execution_mode: main-session-direct",
+                              "execution_mode: **SPLIT (D-10, amended)**"),
+        "files: as a bare string, not a list":
+            GOOD_PLAN.replace("    files:\n      - src/a.py\n      - src/b.py",
+                              "    files: src/a.py, src/b.py"),
+        "an unknown execution_mode token":
+            GOOD_PLAN.replace("execution_mode: main-session-direct", "execution_mode: solo"),
+        "a duplicate task id":
+            GOOD_PLAN + GOOD_PLAN[GOOD_PLAN.index("  - id: T-01"):],
+        "no tasks at all":
+            "schema: plan/1\nfeature: FEAT-TEST\ntasks: []\n",
+        "a task missing verify:":
+            GOOD_PLAN.replace("    verify: |\n      python3 -m pytest\n", ""),
+    }
+    for label, text in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                hy.load_plan(_plan(tmp, text))
+            except hy.YamlParseError:
+                continue
+            raise AssertionError(f"ACCEPTED what it must reject: {label}")
+
+
+def test_load_plan_backticked_path_is_not_silently_cleaned():
+    """The SECOND #147 question: may an entry carry an annotation like `(delete)`?
+
+    No — and the loader is what says so, not a cleanup heuristic. The old `_clean()`
+    stripped backticks and a trailing comma but not a parenthetical, so
+    `` `bin/cost-report.py` (delete) `` resolved ONLY because a `/**` grant swallowed
+    the suffix. Under a narrower grant it was a false violation. Here the value is
+    the literal string, so a resolver gets exactly what the author wrote and can say
+    it resolves to nothing — rather than guessing which characters were commentary.
+    """
+    import harness_yaml as hy
+
+    text = GOOD_PLAN.replace("      - src/a.py", "      - src/a.py (delete)")
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = hy.load_plan(_plan(tmp, text))
+        got = doc["tasks"][0]["files"][0]
+        assert got == "src/a.py (delete)", f"loader altered the authored value: {got!r}"
+
+
+def test_load_plan_reports_line_and_column_on_malformed_yaml():
+    """A denial that says only "does not parse" on a 300-line plan is a loop the
+    author cannot exit. YamlParseError already carries the original exception; this
+    pins that it survives to the caller."""
+    import harness_yaml as hy
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            hy.load_plan(_plan(tmp, "tasks:\n  - id: T-01\n   bad: indent\n"))
+        except hy.YamlParseError as e:
+            assert "line" in str(e.original).lower(), f"no position in: {e.original}"
+            return
+        raise AssertionError("malformed YAML was accepted")
+
+
+def test_the_shipped_template_and_the_SPEC_example_both_satisfy_load_plan():
+    """The template, the normative SPEC example, and the loader must agree — mechanically.
+
+    THIS IS ISSUE #147 ITSELF. That ticket exists because `templates/PLAN.md` prescribed one
+    `files:` shape while the parser accepted three: an author following the template was
+    correct, and an author ignoring it was also correct, and nothing could tell them apart.
+    Prose cannot hold two files in agreement; a test can.
+
+    Both artifacts are loaded through the real `load_plan`, so a template that drifts out of
+    schema fails here rather than at the next planning session. SPEC.md:1701-1702's previous
+    example was itself illegal YAML — three keys on one line — and shipped that way because
+    nothing ever tried to parse it.
+    """
+    import re
+    import harness_yaml as hy
+
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    tmpl = os.path.join(here, "..", "templates", "plan.yaml")
+    hy.load_plan(tmpl)  # raises on any drift
+
+    spec = open(os.path.join(here, "..", "..", "..", "..", ".harness", "harness", "docs", "SPEC.md"),
+                encoding="utf-8").read()
+    m = re.search(r"```yaml\n(# plan\.yaml.*?)\n```", spec, re.S)
+    assert m, "SPEC.md no longer carries a normative plan.yaml example"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "plan.yaml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(m.group(1))
+        hy.load_plan(path)
+
+
 TESTS = [
     test_merge_key_override_is_not_a_duplicate,
     test_missing_pyyaml_is_reportable_not_a_second_crash,
@@ -466,12 +871,22 @@ TESTS = [
     test_manifest_domains_excludes_non_canonical_read_true,
     test_bootstrap_marker_lifecycle,
     test_marker_self_unlinks_when_yaml_imports,
+    test_require_or_die_ignores_the_retired_project_dir_variable,
+    test_require_or_die_survives_a_missing_harness_boundary,
     test_exactly_one_guarded_import_in_the_tree,
     # REGISTERED, and the first attempt was not. This file collects from an
     # explicit list, so a test appended after it is defined and never run —
     # which is issue #133's own theme ("logic correct, nothing calls it")
     # landing inside the change that cites it. Caught by mutation, not by review.
     test_c_loader_is_used_when_libyaml_is_available,
+    # issue #147 — plan.yaml replaces the markdown-that-looks-like-YAML format.
+    test_load_plan_accepts_a_well_formed_plan,
+    test_every_required_task_field_is_actually_required,
+    test_load_plan_rejects_the_shapes_that_broke_PLAN_md,
+    test_load_plan_backticked_path_is_not_silently_cleaned,
+    test_load_plan_reports_line_and_column_on_malformed_yaml,
+    test_the_shipped_template_and_the_SPEC_example_both_satisfy_load_plan,
+    test_load_plan_accepts_a_station_only_record_and_only_with_a_station,
 ]
 
 

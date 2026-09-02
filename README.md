@@ -1,179 +1,192 @@
 # Harness
 
-A unified Claude Code workflow that brings engineering discipline to GSD-based projects. It injects TDD enforcement, spec-driven planning, systematic debugging, and role-based review gates into the GSD workflow — without modifying GSD itself.
+Harness is a provider-neutral OMP agent organization for taking software work from product definition through architecture, implementation, independent validation, and review.
 
-**Built on:** GSD (backbone) + Superpowers (TDD discipline) + gstack (role personas)
+The organization, skills, artifacts, and guardrails stay constant while OMP routes its capability roles to OpenAI, Anthropic, or another configured provider.
 
----
+## What runs
 
-## For Users
-
-### What you get
-
-Once harness is active in a project, GSD subagents automatically follow engineering discipline:
-
-| GSD Agent | Harness Rules Active |
-|-----------|---------------------|
-| `gsd-executor` | TDD Iron Law, zero-placeholder gate, exemption checks |
-| `gsd-planner` | Spec-driven planning, task completeness requirements, CONTEXT.md as single spec |
-| `gsd-verifier` | TDD compliance check, spec traceability check, gate completion check |
-| `gsd-debugger` | 4-phase RCA protocol (Observe → Hypothesize → Test → Fix), 3-failure cap |
-
-You also get role-based reviewers that fire at key workflow points (see [Role Gates](#role-gates) below).
-
-### Prerequisites
-
-- [GSD](https://github.com/gsd-build/get-shit-done) installed globally
-- Claude Code CLI
-
-### New projects — automatic
-
-Run `/gsd-new-project` as normal. If harness has been deployed on your machine, it activates automatically:
-
-1. Harness skills are copied to your project
-2. `agent_skills` entries are added to `.planning/config.json`
-3. Your project is registered for future harness updates
-
-Nothing extra to run. Harness is active from the first `/gsd-execute-phase`.
-
-### Existing projects — ask the maintainer
-
-If your project predates harness, ask the harness maintainer to run:
-
-```
-/harness-deploy /absolute/path/to/your-project
+```text
+main session (user channel)
+  → harness-orchestrator
+      → harness-product-lead
+          → product specialists
+      → harness-eng-lead
+          → engineering specialists
+      → harness-validator-lead
+          → QA and independent reviewers
 ```
 
-This copies skills, configures `config.json`, and registers your project.
+All 16 roles are native OMP task agents. Spawn allowlists encode the hierarchy and members are leaves.
 
-### Role gates
+## Provider selection
 
-Role-based reviewers challenge assumptions at key workflow points. They are available as agents:
+Run OMP with an explicit provider overlay:
 
-| Agent | Fires when | What it does |
-|-------|-----------|--------------|
-| `harness-eng-reviewer` | Before + after `/gsd-discuss-phase` on architectural phases | Pre-discuss: surfaces architecture questions. Post-discuss: reviews decisions in CONTEXT.md |
-| `harness-ceo-reviewer` | At `/gsd-new-project` or scope change | Challenges scope, validates fit, asks forcing questions |
-| `harness-code-reviewer` | After `/gsd-execute-phase` on implementation plans | Two-stage: spec compliance then code quality |
-| `harness-qa-reviewer` | Before `/gsd-ship` | Generates test cases from CONTEXT.md, verifies against source |
-| `harness-security-reviewer` | Before `/gsd-ship` | OWASP Top 10 + STRIDE threat modeling |
+```bash
+# OpenAI Codex
+omp --config .omp/providers/openai.yml
 
-**Current status:** Trigger instructions are in your project's `CLAUDE.md` (Harness section). Global automatic triggering across all projects is in progress — see [CLAUDE.md](./CLAUDE.md) for the current trigger lines.
-
----
-
-## For Maintainers
-
-### Architecture
-
-```
-harness repo (.claude/skills/harness/)   ← development copy (git-tracked)
-        │
-        │  /harness-deploy
-        ▼
-~/.claude/skills/harness/               ← global distribution point (survives /gsd-update)
-        │
-        │  /harness-deploy <path>  or  auto on /gsd-new-project
-        ▼
-{project}/.claude/skills/harness/       ← per-project instance
-{project}/.planning/config.json         ← agent_skills entries pointing to above
-~/.gsd/harness-registry.json            ← registry of enrolled projects
+# Anthropic Claude
+omp --config .omp/providers/anthropic.yml
 ```
 
-The harness repo is where you develop. `~/.claude/skills/harness/` is the distribution point. Projects get a copy via deploy or auto-activation — they never pull from the harness repo directly.
+Canonical agents select provider-neutral capability aliases:
 
-### Why this survives `/gsd-update`
-
-`/gsd-update` replaces `~/.claude/get-shit-done/`, `~/.claude/commands/gsd/`, and `~/.claude/agents/gsd-*.md`. Everything harness uses is outside those paths:
-
-| Harness file | Why it's safe |
-|-------------|---------------|
-| `~/.claude/skills/harness/` | Not in `get-shit-done/` |
-| `~/.claude/agents/harness-*.md` | Not `gsd-` prefixed |
-| `~/.claude/CLAUDE.md` | Never touched by GSD update |
-| `~/.gsd/harness-registry.json` | Not in `get-shit-done/` |
-| `{project}/.claude/`, `.planning/` | Project-level, not global |
-
-### Repository structure
-
-```
-.claude/
-  agents/                    ← role gate agent definitions
-    harness-eng-reviewer.md
-    harness-ceo-reviewer.md
-    harness-code-reviewer.md
-    harness-qa-reviewer.md
-    harness-security-reviewer.md
-  commands/
-    harness-deploy.md        ← /harness-deploy slash command
-  skills/harness/
-    SKILL.md                 ← routing index (do not load subdirs directly)
-    tdd/
-      SKILL.md               ← injected into gsd-executor
-    rules/
-      SKILL.md               ← injected into gsd-verifier, gsd-planner, gsd-debugger
-      tdd-enforcement.md
-      spec-driven.md
-      systematic-debugging.md
-      code-review.md
-      verification-rules.md
-    personas/
-      SKILL.md
-      eng-review.md
-      ceo-review.md
-      qa-gate.md
-.planning/
-  harness.json               ← gate toggles, role trigger config
-  config.json                ← agent_skills injection paths (project-level)
+```yaml
+model: "@strong"
 ```
 
-### Deploying skill updates
+The overlays map `deep`, `strong`, `standard`, and `review` to concrete models. Switching providers changes configuration only; it does not change prompts, tools, skills, spawning, hooks, artifacts, or digest schemas.
 
-After changing anything in `.claude/skills/harness/`:
+## Long-running workflow
 
-```
-/harness-deploy
-```
+Use the same Harness instruction under either overlay. Only the concrete models selected by the
+overlay change.
 
-This:
-1. Copies `.claude/skills/harness/` → `~/.claude/skills/harness/`
-2. Regenerates `~/.claude/skills/harness/manifest.json` from `config.json` agent_skills
-3. Pushes updated skills to all registered projects
-
-### Enrolling an existing project
-
-For any GSD project that predates harness:
-
-```
-/harness-deploy /absolute/path/to/project
+```text
+main session
+  → one phase-scoped harness-orchestrator
+      → one squad lead
+          → one ready wave of members
 ```
 
-This copies skills, merges `agent_skills` into `config.json`, and registers the project. Future `/harness-deploy` (no args) will include it automatically.
+Each governed task prompt starts with `HARNESS-FEATURE: FEAT-NN-slug` (or `BUG-NN-slug`). The
+main session dispatches the orchestrator in the background, receives agent/job identity
+immediately, and ends its turn; OMP injects the orchestrator's terminal result back into that
+session.
 
-### Adding a new skill
+Inside the Harness tree, every lead and member is declared `blocking: true`. An orchestrator's
+task call stays inside OMP until its lead is terminal, and a lead's ready-wave call stays inside OMP
+until its members are terminal. The parent model is inactive at that tool boundary: it does not
+poll Agent Hub, call `hub wait`, sleep, or emit keepalives. Agent Hub still shows the full live
+lineage. When the blocking tool result returns, the parent re-reads its checkpoint, verifies the
+cited artifact, and advances one durable transition. A phase boundary starts a fresh orchestrator.
 
-1. Create the skill file(s) under `.claude/skills/harness/`
-2. Add a `SKILL.md` index if creating a new subdirectory
-3. Add the agent type → skill path mapping to `agent_skills` in `.planning/config.json`
-4. Run `/harness-deploy` — manifest is regenerated and all registered projects receive the update
+The OMP process is the supervisor. Running jobs do not survive that process exiting unless the OMP
+process itself is kept alive by an external service supervisor. Project configuration enables async
+delivery and removes the task wall-clock limit, while OMP's request budget remains the independent
+runaway-turn safety bound.
 
-### The manifest
+## Recovery after terminal loss
 
-`~/.claude/skills/harness/manifest.json` is the single source of truth for which `agent_skills` entries get written to enrolled project `config.json` files. It is regenerated from `config.json` on every `/harness-deploy` — never edit it directly.
+Restart with the same provider overlay and resume the persisted session:
 
-### Auto-activation trigger
+```bash
+# OpenAI
+omp --config .omp/providers/openai.yml --resume
 
-`~/.claude/CLAUDE.md` contains a trigger that fires after `/gsd-new-project` completes. It reads the manifest, copies skills to the new project, merges `config.json`, and registers the project. This is the zero-setup path for all new projects going forward.
+# Anthropic
+omp --config .omp/providers/anthropic.yml --resume
+```
 
-### Role gates — global integration (in progress)
+Then:
 
-Role gate agents currently live in `.claude/agents/` (harness repo only) and trigger instructions are in the harness project's `CLAUDE.md`. The next planned improvement:
+1. Inspect Agent Hub and `history://` first; do not revive or kill an agent merely because it is
+   parked.
+2. Resume the Harness feature named by `HARNESS-FEATURE:`.
+3. Reconcile in this order: the feature/run checkpoint on disk, a persisted `agent://` or
+   `history://` result, then landed commits.
+4. A claim owned by the dead OMP PID is stale immediately. Release only that feature's targeted
+   claim.
+5. If the checkpoint has a valid terminal artifact, collect it. If it has no terminal artifact and
+   the regular agent session is recoverable, revive that agent. Otherwise re-dispatch only the one
+   unfinished checkpointed step.
 
-- Move agents to `~/.claude/agents/` (globally available in all project sessions)
-- Add trigger instructions to `~/.claude/CLAUDE.md` (apply to all GSD projects)
+Never infer PASS from a transcript, a claim file, or a card on GitHub. A repeated async delivery or
+resume of an already-terminal step is an idempotent no-op.
 
-Until that ships, role gates work in the harness project automatically and in other projects via `CLAUDE.md` instructions added during enrollment.
+## GitHub lifecycle
 
-### Key constraint: agent_skills paths are project-relative
+The GitHub mirror follows Harness state; it is not a heartbeat channel:
 
-GSD's `validatePath` rejects absolute paths for `agent_skills`. Skills must be under the project root. This is why each project needs its own `.claude/skills/harness/` copy rather than referencing `~/.claude/skills/harness/` directly. The deploy mechanism handles this — you never manage per-project skill files manually.
+1. The signed plan opens one parent issue and one sub-issue per `T-NN`.
+2. Write the task status to `plan.yaml`, then `gh-sync.py start-task` moves that task to
+   `Building`.
+3. Validation entry writes `Review` for the parent and task cards.
+4. User-accepted ship writes eligible task, source, and parent cards to `Done`; GitHub's
+   `Auto-close issue` workflow closes them.
+5. A card with an open child is held open and the blocking child is named.
+
+The orchestrator owns `open`, team-task `start-task`, and its phase `status`. The main session owns
+main-session-direct transitions, ship acceptance, `ship`, `record-pr`, `backlog`, and `abandon`.
+Write `plan.yaml`/`feature.json` first, then run the owned mirror command in the same act. On wake or
+recovery, read those files and their stored GitHub receipts before deciding whether a transition is
+still due; do not poll GitHub while a child runs and do not create replacement issues. Direct
+`gh issue close` commands are blocked under OMP; `gh-sync.py abandon` is the only direct-close path.
+
+## Canonical surfaces
+
+| Surface | Location |
+| --- | --- |
+| Shared project guidance | `AGENTS.md` |
+| OMP configuration | `.omp/config.yml` |
+| Provider mappings | `.omp/providers/*.yml` |
+| Canonical agents | `.omp/agents/harness-*.md` |
+| OMP lifecycle enforcement | `.omp/extensions/harness-hooks.ts` |
+| Authored skills and utilities | `.claude/skills/harness-*/` |
+| Project state and durable artifacts | `.harness/` |
+| Organization, routing, and write domains | `.harness/team-config.yaml` |
+
+`.claude/skills/` is the single authored skill tree used directly by Claude Code. `.agents/skills` is a compatibility symlink to that tree, giving OMP the standard Agent Skills path without a second copy. `CLAUDE.md`, `.claude/agents/`, and `.claude/settings.json` remain Claude Code adapters; `sync-agent-adapters.py` generates Claude role files from the OMP definitions.
+
+OMP project configuration disables Claude-format discovery. Skills remain available through `.agents/skills`, proving that OMP discovery does not depend on enabling the Claude provider even though the shared files are authored under `.claude/skills`.
+
+## Guardrails
+
+The native OMP extension preserves the Harness enforcement contracts:
+
+- inject tiered Expertise and the codebase index before a task agent starts;
+- deny out-of-domain writes;
+- deny reviewer writes through Bash;
+- require work-tracked branch names;
+- prevent per-dispatch model overrides;
+- report post-write state-shape failures;
+- reject malformed task-agent digests before accepting a handoff.
+
+Policy remains in the tested shell/Python modules authored under `.claude/skills/harness/bin/` and exposed to OMP through `.agents/skills/harness/bin/`; the TypeScript extension adapts OMP lifecycle events and does not duplicate policy.
+
+## Expertise and artifacts
+
+Expertise remains durable provider-neutral data:
+
+```text
+~/.harness/expertise/<agent>.md
+.harness/expertise/<agent>.md
+.harness/<repo>/expertise/<agent>.md
+.harness/codebase/INDEX.md
+```
+
+Repository knowledge overrides project knowledge, which overrides global craft knowledge. Other briefs, plans, designs, run digests, review reports, UAT scripts, and handoffs remain under `.harness/` and are loaded by path only when needed.
+
+See [`.harness/README.md`](.harness/README.md) for layout and writer ownership.
+
+## Development
+
+Harness develops itself only in a worktree under `.claude/worktrees/`. DEC-174 requires hooks, validators, gate scripts, and their tests to be changed directly rather than through the enforcement layer being replaced.
+
+Run:
+
+```bash
+# Complete suite
+bash .agents/skills/harness/bin/run-unit-tests.sh
+
+# Provider-neutral surface and adapter drift
+python3 .agents/skills/harness/bin/check-omp-port.py
+
+# Project invariants
+bash .agents/skills/harness/bin/check-state.sh
+```
+
+To change a role, edit `.omp/agents/<name>.md`, then regenerate and check Claude compatibility:
+
+```bash
+python3 .agents/skills/harness/bin/sync-agent-adapters.py --apply
+python3 .agents/skills/harness/bin/sync-agent-adapters.py --check
+```
+
+To add a skill, create `.claude/skills/harness-<name>/SKILL.md` and add its name to the applicable agents' `autoloadSkills` lists. OMP discovers it through the `.agents/skills` symlink.
+
+## Factory repositories
+
+The Harness repository holds the organization and skills. Product repositories hold their own `.harness/` state. Add a repository to `.harness/factory/fleet.yaml`; the factory materializes its checkout under the declared `workspace_root`, and `/harness-init` creates that repository's state.

@@ -5,8 +5,8 @@ description: Onboard a project to the harness — interview the user, write .har
 
 # Harness: Init
 
-The onboarding interview, run **inside a target project**. `/harness-deploy` distributes the tool and
-**never touches project state**; this writes every project artifact, once. **Enroll = deploy + init.**
+The onboarding interview. Harness is not copied into a product repository — the factory works on a
+checkout and reaches it remotely — so this is the one step that writes a project's artifacts.
 
 **Run this in the main session.** Only the main session can call `AskUserQuestion` — a subagent has no
 channel to the user. Delegate the *mechanical detection* to `dev-ops`; never delegate the interview.
@@ -14,22 +14,23 @@ channel to the user. Delegate the *mechanical detection* to `dev-ops`; never del
 **The interview IS a grilling (DEC-164).** Load `harness-grilling` and run it: one question at a
 time with your recommendation, facts looked up rather than asked, destination named first, and the
 artifact written to `.harness/notes/`. Its answers seed `harness.json`, the domain description, and
-the first `glossary.md` terms.
+the first `.harness/glossary.md` terms.
 
 ## Preflight — stop if any of these fails
 
 ```bash
-test -d .claude/skills/harness/templates && echo "templates ok" || echo "NO TEMPLATES"
+test -d .agents/skills/harness/templates && echo "templates ok" || echo "NO TEMPLATES"
 claude --version
 git rev-parse --show-toplevel 2>/dev/null || echo "NOT A GIT REPO"
 ```
 
-- **No templates** → `/harness-deploy` has not run here. Stop and say so; there is nothing to instantiate.
+- **No templates** → the harness templates directory is not readable from here. Stop and say so;
+  there is nothing to instantiate.
 - **CLI < 2.1.217** → below the floor for the spawn env vars. Stop; the depth setting will not take.
 - **Not a git repo** → warn but continue. Commit attribution and `review_sha` pinning will not work.
 - **`.harness/` already exists** → this project is initialised. Route to `--upgrade`, do not re-run fresh.
 
-You will need permission to run the scripts in `.claude/skills/harness/bin/` and to write
+You will need permission to run the scripts in `.agents/skills/harness/bin/` and to write
 `.claude/settings.json`, which many setups gate as a sensitive file. Ask for it up front rather than
 discovering it at step 1 — a denial there is a **stop**, not a detour (see below).
 
@@ -38,21 +39,81 @@ discovering it at step 1 — a denial there is a **stop**, not a detour (see bel
 ### 1. Install the eight prerequisites — HARD GATE, do this first
 
 ```bash
-.claude/skills/harness/bin/merge-settings.py . \
-  --template .claude/skills/harness/templates/settings.snippet.json
-.claude/skills/harness/bin/merge-gitignore.sh .
-.claude/skills/harness/bin/merge-settings.py . --check   # must exit 0 before step 2
-python3 -c 'import yaml' 2>/dev/null && echo OK || echo MISSING   # the 7th prerequisite
+.agents/skills/harness/bin/merge-settings.py . \
+  --template .agents/skills/harness/templates/settings.snippet.json
+.agents/skills/harness/bin/merge-gitignore.sh .
+.agents/skills/harness/bin/merge-settings.py . --check   # must exit 0 before step 2
+python3 -c 'import yaml' 2>/dev/null && echo OK || echo MISSING          # the 7th prerequisite
+python3 -c 'import jsonschema' 2>/dev/null && echo OK || echo MISSING   # the 8th prerequisite
 ```
 
-**If that last line prints `MISSING`, STOP.** PyYAML is REQUIRED, not optional (DEC-171 am.1): there
-is no line-scan fallback anywhere in `bin/`, deliberately, because a fallback leaves the hand-rolled
-parser it exists to remove. Print this for the user to run, then re-check:
+#### The per-clone step: point git at the tracked hooks directory
+
+**This is NOT a ninth prerequisite and the count above does not change.** The eight are settings
+and packages a script merges into the project. This one is a git config a *clone* carries, so a
+fresh clone of an already-onboarded project still needs it and the eight will already be in place.
+
+**Why it is needed at all.** The harness ships a tracked `post-merge` hook at
+`.claude/skills/harness/hooks/`, and git ignores it until `core.hooksPath` points there. Measured
+in this checkout: `git config --get core.hooksPath` returned
+`/Users/molchairuangutai/GitHub/harness/.git/hooks` — an absolute path carrying a username, so no
+tracked hook could run in any other clone.
+
+Run these three steps in order. **Never skip to step 2.**
+
+```bash
+# 1. Read what is there. Exit 1 means unset, which is normal — tolerate it.
+git config --get core.hooksPath || echo "(unset)"
+```
+
+**2. Unset, or already `.claude/skills/harness/hooks`?** Set it, and say which of the two you
+found:
+
+```bash
+git config core.hooksPath .claude/skills/harness/hooks
+git config --get core.hooksPath      # must print .claude/skills/harness/hooks
+```
+
+**The path is RELATIVE, deliberately.** An absolute one is exactly what produced the broken value
+above. A relative `core.hooksPath` resolves against the repository root, so it is correct in every
+clone. Running this step twice leaves the same value and is not an error.
+
+**3. Set to ANYTHING ELSE? STOP and ask the user before writing.** Print the value you found, tell
+them it is a hooks directory the harness did not write, and tell them what pointing git at the
+harness directory will do to it:
+
+> `core.hooksPath` takes over hook resolution for the **whole clone**, not for one hook. Every hook
+> git looks for is resolved in the directory it names, and the previous directory is bypassed
+> entirely. So every hook currently resolved from `<the value you found>` stops running.
+
+**Never overwrite an operator's own hooks path silently.** If they agree, their hooks must move
+into `.claude/skills/harness/hooks/` or they stop firing — say that too, rather than leaving them
+to discover it at the next merge.
+
+**A clone that skipped this step is caught, not left silent.** `check-state.sh`'s **INV-31** reports
+an uninstalled merge hook on every run — separately for a `core.hooksPath` that does not resolve
+here, and for a `post-merge` that is missing or not executable. That matters because this document
+is read once, at onboarding, and an already-onboarded clone never comes back to it: a doc step
+reaches a clone once, an invariant reaches every clone every run. Without the hook the post-merge
+sweep never fires, and after DEC-203 that sweep is the only thing that runs `ship` — so the clone
+silently stops closing tickets.
+
+**If either line prints `MISSING`, STOP.** Both packages are REQUIRED, not optional.
+
+**PyYAML** (DEC-171): there is no line-scan fallback anywhere in `bin/`, deliberately, because
+a fallback leaves the hand-rolled parser it exists to remove.
+
+**jsonschema**: a feature's execution state is schema-checked at write time, and **a validator that
+passes silently when its checker is absent is a gate that looks real and does nothing.**
+
+Print this for the user to run, then re-check:
 
 ```
-python3 -m pip install pyyaml
-# if that fails with "externally-managed-environment" (PEP 668, e.g. Homebrew/Debian):
-python3 -m pip install --user --break-system-packages pyyaml
+python3 -m pip install pyyaml jsonschema
+# only one of them missing? then just the one, e.g.:
+python3 -m pip install jsonschema
+# if either fails with "externally-managed-environment" (PEP 668, e.g. Homebrew/Debian):
+python3 -m pip install --user --break-system-packages pyyaml jsonschema
 ```
 
 That is the content of `harness_yaml.INSTALL_COMMAND`. **Quote it from there rather than
@@ -81,8 +142,8 @@ on; nothing here waits on a restart (step 9 has the one real restart caveat).
 
 ```bash
 mkdir -p .harness/expertise
-cp .claude/skills/harness/templates/harness.json    .harness/harness.json
-cp .claude/skills/harness/templates/team-config.yaml .harness/team-config.yaml
+cp .agents/skills/harness/templates/harness.json    .harness/harness.json
+cp .agents/skills/harness/templates/team-config.yaml .harness/team-config.yaml
 ```
 
 Delete the `_template` key from `.harness/harness.json` — it is a template marker, not project state.
@@ -176,17 +237,6 @@ not finished onboarding.
 until they approve, and that `/harness` will keep saying so. A pending brief is a correct state; a
 brief you approved on their behalf is not.
 
-### Map the codebase — runs AS PART OF INIT, not as a remembered follow-up (DEC-140)
-
-If the project has **existing source code**, the last act of init is spawning
-`harness-orchestrator` with **mission map** (DEC-137) — the org's structural knowledge is built
-before the first feature ever plans, so nothing downstream runs unmapped.
-
-- **Existing code** (dev-ops detection found source beyond scaffolding) → spawn mission map now,
-  in the background; tell the user it is running and that `codebase/map.html` lands when done.
-- **Greenfield** (no meaningful source) → skip, and say so — the map builds naturally as ships
-  refresh it. INV-14 will start nagging the moment real code exists without a map.
-
 ### GitHub Issues mirror — ask ONCE, here, so it is never forgotten (DEC-138)
 
 Ask the user: **"Mirror features to GitHub Issues? (feature → milestone, tasks → issues, one-way
@@ -198,6 +248,50 @@ outbound after your plan approval)"**
   `"github": { "sync": true, "repo": "<owner/name>" }` into `.harness/harness.json`.
 - **No** → write `"github": { "sync": false, "repo": null }` — an explicit off, not an absence.
   INV-13 treats a missing block as "never asked" and nags; an explicit false is a decision.
+
+### The project board — provision it, then read the workflow report (FEAT-33)
+
+Runs after the mirror section above, because it needs the repo pinned. Skip it entirely when
+`github.sync` is false.
+
+- `python3 .agents/skills/harness/bin/board_lifecycle.py provision` — **read the exit code.**
+  `0` provisioned or already correct. `2` the declaration is unusable and the message names the
+  key — **nothing was written**. `3` a NEW project was created, linked, AND its Status field
+  made to carry every declared station — one run, not two — and its number must be written
+  into that project's `harness.json` `github.board.number` **before anything else runs**.
+  `4` a project was created but a follow-up write FAILED — either the link, or the Status field
+  after a successful link: **the project exists.** Record the number the message names before
+  retrying, or the retry creates a second board.
+- **On a NEW board, `provision` DELETES GitHub's default columns — when your `station_field` is
+  the one GitHub already made.** A brand-new Projects v2 project ships a `Status` single-select
+  carrying `Todo`, `In Progress` and `Done` (measured 2026-08-23 on project 7). Declare
+  `station_field: "Status"`, as every board here does, and `provision` replaces that option set
+  with exactly your declared stations and prints which options it removed. Declare any other
+  name — `"Station"`, say — and there is nothing to replace: `provision` CREATES that field and
+  GitHub's own `Status` field survives untouched, still carrying `Todo` and `In Progress`, as a
+  column the board does not use. Neither behaviour is a bug; the difference is worth knowing
+  before you pick a field name.
+  Either way it touches only a board created in that same run — no items exist yet, so no card
+  can lose its column. On an EXISTING board it only ever ADDS the missing stations and never
+  removes a column.
+- **Provisioning works only for a USER-OWNED board.** Every primitive queries `user(login:)`, and
+  an organization-owned project is refused with "organization-owned board not supported". Create
+  and configure that by hand; `provision` exits 2 saying so rather than doing something partial.
+  Both repositories in the fleet today happen to be user-owned, so nothing else would surface this.
+- `python3 .agents/skills/harness/bin/board_lifecycle.py audit` — show the operator the WORKFLOW
+  findings **verbatim**.
+
+**The three workflows are a HARD GATE you cannot automate.** `Item closed`, `Auto-close issue` and
+`Pull request merged` cannot be enabled by any API: all 31 ProjectV2 mutations include
+`deleteProjectV2Workflow` and none that creates or enables one, and `ProjectV2Workflow` exposes
+neither its trigger nor its action. **Only a click in the project's web UI turns them on.** Ask the
+operator to do it, then re-run the audit. Onboarding is not finished until it reports all three
+enabled.
+
+**Accepted cost, ruled by the operator:** this check runs ONCE, here, and never in
+`check-state.sh` — that gate runs at every `/harness` door and before every commit, so a network
+call there would fire dozens of times per build. The consequence is real: a workflow switched off
+after init is invisible until the next init run.
 
 ### 8. Design pass — UI projects only
 
@@ -211,15 +305,15 @@ it reads as though the decisions were made.
 ### 9. Verify, then warn about the restart
 
 ```bash
-.claude/skills/harness/bin/check-state.sh
-.claude/skills/harness/bin/merge-settings.py . --check
+.agents/skills/harness/bin/check-state.sh
+.agents/skills/harness/bin/merge-settings.py . --check
 ```
 
 `check-state.sh` must exit 0. It will not if the brief is pending (step 7) or the settings merge was
 skipped — both are real failures, not noise to talk past.
 
-Then say this, explicitly, as the last thing — **but only if `/harness-deploy` installed or updated
-agent definitions during this same session:**
+Then say this, explicitly, as the last thing — **but only if agent definitions were installed or
+updated during this same session:**
 
 > **Restart Claude Code before running a team.** Agent definitions are not live-reloaded (DEC-100a), so
 > agents installed in this session are not spawnable yet. Without a restart the first team fails with
@@ -235,10 +329,10 @@ when it is not is its own kind of wrong.
 For a project that is already initialised, after a newer harness has been deployed.
 
 ```bash
-.claude/skills/harness/bin/upgrade-config.py .
-.claude/skills/harness/bin/merge-settings.py . \
-  --template .claude/skills/harness/templates/settings.snippet.json
-.claude/skills/harness/bin/merge-gitignore.sh .
+.agents/skills/harness/bin/upgrade-config.py .
+.agents/skills/harness/bin/merge-settings.py . \
+  --template .agents/skills/harness/templates/settings.snippet.json
+.agents/skills/harness/bin/merge-gitignore.sh .
 ```
 
 - `harness.json` is **merged** — new template entries added, every project value kept. `test_kinds.*.cmd`

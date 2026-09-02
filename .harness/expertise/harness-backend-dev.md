@@ -1,54 +1,45 @@
 # Expertise — harness-backend-dev
-
 ## Patterns (max 15)
-- P-01: CANARY-7f3a9b — this line exists only to prove Expertise injection fires.
-- P-02: WHEN a task's listed verify steps are grep receipts plus a test suite that imports code
-  standalone DO add a smoke check that actually imports/executes the changed module through its
-  real call path — a broken import can leave every listed receipt green.
-- P-03: WHEN asserting a call was removed via a log grep DO scope the grep to the payload, not the
-  path — a path-only absence grep can vacuously "prove" removal while unrelated calls sharing that
-  path remain.
-- P-04: WHEN a task claims a change is byte-identical to a previously deployed file DO diff against
-  the copy under `~/.claude/skills/harness/bin/` as the pre-change reference, rather than trusting
-  the claim from context alone.
-- P-05: WHEN a new gate binds every persona sharing a return contract DO check whether your own
-  review's return would satisfy it — a PASS accepted only because the change hasn't landed yet is
-  itself proof of the gap it is reviewing.
-- P-06: WHEN raising a review finding about a structural gap DO phrase it as the gap itself, not a
-  proposed fix — a finding named this way survived a later redirect that changed the whole fix
-  mechanism, while a fix-shaped finding would not have.
-- P-07: WHEN a task extracts text via an awk/sed line-range or tail-anchored match DO verify the
-  anchor pattern occurs exactly once in the target file — a second match silently shifts the
-  extracted range with no error.
-- P-08: WHEN adding an assertion to close a vacuous-pass gap DO verify it actually distinguishes a
-  broken implementation from a correct one — an "OK-line present" check is weak if a broken
-  implementation also emits an OK-prefixed line; the assertion that flips (e.g. VIOLATION absence)
-  carries the real signal.
-
+- P-01: WHEN asserting an exception's VALUE slot or a numeric/sentinel field DO assert the exact expected value, never a weaker existence/type check — a weaker check (e.g. `is not None`) can pass under the same mutant that breaks the real contract; pick a value absent from every compared case's fixed prose.
+- P-02: WHEN a task's listed verify steps are grep receipts plus a test suite that imports code standalone DO add a smoke check that actually imports/executes the changed module through its real call path — a broken import can leave every listed receipt green.
+- P-03: WHEN asserting a call was removed via a log grep DO scope the grep to the payload, not the path — a path-only absence grep can vacuously "prove" removal while unrelated calls sharing that path remain.
+- P-04: WHEN a test case's call could raise under a mutation DO wrap it in try/except and compare against a sentinel, never call it bare — an unguarded raise crashes the whole suite, silently skipping every later case, and the surviving output still looks like a clean partial pass.
+- P-05: WHEN a check's expected side is derived from, or shares code/state with, the very implementation under test — mutate-in-place-then-compare-to-self, or an independent verifier importing the tool's own helper — DO build an independently-derived, distinctively-valued oracle instead. A self-referential comparison cannot diverge, so it cannot redden for a real defect.
+- P-06: WHEN the mandated pre-edit RED run passes on an untouched tree DO stop — a green RED means the premise is stale or the test is vacuous, not permission to proceed — and establish provenance from on-disk artifacts before writing or overwriting anything.
+- P-07: WHEN adding or fixing an assertion to close a vacuous-pass gap DO prove it with a mutant, predicting by name which checks redden before the run — an unpredicted redness is a FAIL unless it is a pre-existing check already coupled to the same path, which you verify, never assume.
+- P-08: WHEN N things must be enumerated as pairwise-distinct (messages, states, branches) DO verify all C(N,2) pairwise comparisons exist, not just N-1 chained ones — a missing pair can be uncovered even though every other pair is asserted, and inequality is not transitive.
+- P-09: WHEN a source file is deliberately altered to verify a test's power — mutation-testing, or reconstructing a skipped pre-edit RED — DO hash it, restore (`git show HEAD:<path>` if tracked, else moved aside), re-verify the hash, and confirm absence from `git status --porcelain`. An unverified restore claim is not checkable.
+- P-10: WHEN scoping a mutation to prove one discriminator without detonating unrelated fixtures DO mutate the DATA the check depends on (a marker, a fixture value), not a GUARD shared by every caller — a shared-guard mutation routes every caller through the changed path, for a much larger blast radius.
+- P-11: WHEN fixing a coverage hole in already-correct production code (no defect, nothing to add) DO prove it by mutation-testing the existing code, not by a RED/GREEN cycle on new production code — the Iron Law governs production-code order, and there is none to add for a test-only fix.
+- P-12: WHEN naming a test assertion for a property DO name it only for what the assertion can actually distinguish — a call-tuple equality check named "no state scoping" asserts nothing about state and passes vacuously even after the real state-scoping property breaks.
+- P-14: WHEN a side-effecting write must not fire on an early-exit path DO place it as the unconditional last statement reached after every exit primitive (e.g. `sys.exit`), not behind a conditional guard enumerating exit cases — reaching that statement is itself the proof no early exit fired.
+- P-15: WHEN a module-scope constant is computed once at import time DO add at least one unpatched-default test case that exercises it without monkeypatching first — if every other case patches the constant before use, a suite can stay fully green forever over a stale default nothing exercises.
+- P-16: WHEN a complexity gate rejects a single function combining several responsibilities DO extract each responsibility into a small named helper from the start, not split after the gate fails it — flattening nesting drops cyclomatic and cognitive scores together.
 ## Gotchas (max 15)
-- G-01: The harness repo has no application source; src/** is empty here.
-- G-02: WHEN a test suite's docstring or label claims a specific contract DO treat it as an
-  unverified claim and check the adjacent assertion actually matches it — a stale label can
-  propagate across review tiers as if it were a measurement.
-- G-03: WHEN writing fixtures against the fake-gh test harness DO read its logging and
-  issue-numbering behavior in `.claude/skills/harness/bin/test-gh-sync.py` first — assumptions
-  about counters, log format, or which calls get logged fail loudly but still cost a debug cycle.
-- G-04: WHEN a task's stated intent and its verify command assert opposite rules DO treat the
-  verify command as what binds downstream behavior, not the intent prose — the executor acts on
-  verify, so a contradiction there is a live defect even if the intent reads correctly.
-- G-05: WHEN verifying a "clean on arrival"/no-pre-existing-drift claim DO diff against a fresh
-  checkout of the cited commit, not the current working tree — a working tree already touched by
-  later runs can launder a false baseline claim as true.
-- G-06: WHEN a script's own source is grep-scanned for forbidden identifiers as a verify receipt DO
-  avoid spelling those identifiers anywhere in the file, including comments or docstrings that
-  explain the prohibition — the explanation text itself counts as a hit.
-- G-07: WHEN a receipt requires zero grep hits for a banned pattern (e.g. `startswith`) DO expect it
-  to fire on legitimate unrelated uses too (e.g. parsing subprocess output, not path matching) — the
-  check is textual not semantic; rewrite to satisfy it even when the change is cosmetic.
-- G-08: WHEN building a negative-path ("ungranted") fixture against the domain manifest DO check
-  team-config.yaml for broad top-level globs (e.g. `docs/harness/**`) before assuming a path
-  resolves to NOBODY — pick a path outside every domain prefix instead.
-
+- G-01: WHEN a coverage sweep or mutation produces zero hits/zero red checks DO treat that as inconclusive, not proof of absence — a fixture may spell the condition differently than your anchor terms, or an upstream contract may already foreclose the input shape; read the fixture or trace the access pattern.
+- G-02: WHEN a test suite's docstring or label claims a specific contract DO treat it as an unverified claim and check the adjacent assertion actually matches it — a stale label can propagate across review tiers as if it were a measurement.
+- G-04: WHEN a task's stated intent and its verify command assert opposite rules DO treat the verify command as what binds downstream behavior, not the intent prose — the executor acts on verify, so a contradiction there is a live defect even if the intent reads correctly.
+- G-05: WHEN a claim about state — a receipt's 'preserved' assertion, a dispatch's stated gap, or your own prior read — DO verify it directly: diff a fresh checkout of the cited base for drift claims, or the live tree for presence/absence claims — prose descriptions are snapshots, not fact.
+- G-06: WHEN every fixture exercising a guard routes through one shared helper and none targets the call site directly DO write the guard as a property of parsed source (an AST rule over nodes), not a string/exclusion-list match — call-site-only regressions stay invisible to shared-helper fixtures.
+- G-07: WHEN a mutation runs across multiple test scripts DO treat only a clean, named-check FAIL as valid proof — a script that ABORTS instead (uncaught traceback, no per-check tally) proves nothing about the target check, even in the same run; report the abort separately, never as evidence.
+- G-08: WHEN asserting a rendered count in text output DO use a word-boundary or anchored predicate, never a bare substring test — the substring is contained inside every larger rendered count, so the check passes through exactly the regression it exists to catch.
+- G-10: WHEN a test double models a call or its response DO assert the full structural contract — verb/method, not just argv text; payload shape AND outcome class (success vs failure), not a generic stub — an under-modeled double leaves decode, verb, and misrouted-except paths untested behind a passing check.
+- G-11: WHEN an assertion searches a tool's stdout for a failure message DO first confirm which stream the tool actually writes it to — a check written against stdout is permanently blind to a message the tool writes to stderr, and its pass/fail is unrelated to what the tool actually does.
+- G-13: WHEN restoring a mutation probe mid-cycle, nothing committed yet, DO NOT use `git checkout -- <path>` as the restore step — it resets to HEAD, the pre-fix defect state, not the prior cycle's fix, and can silently revert still-live work. Restore by hand and re-verify the hash instead.
+- G-14: WHEN a contract states a negative invariant over two conditions (no fallback on remote failure AND a local copy present) DO enumerate the 2x2 and name the untested cell — two fixtures covering disjoint cells leave it untested, and the code fails open under a matching mutation.
+- G-16: WHEN a writeup states a count, or "zero FAIL lines" is offered as proof of a real green, DO re-run the count and check it rose by the expected delta — a silent zero-FAIL false green (e.g. a SyntaxError) looks identical to a genuine pass unless the count is checked.
+- G-17: WHEN a fixture's path shape encodes the same assumption as the code under test DO pair a wrong-shaped fixture asserted to yield zero matches with a correctly-shaped one asserted to yield a nonzero count — fixtures drawn from the implementer's own mental model agree with its bugs, not catch them.
+- G-18: WHEN operating inside a worktree-based session DO pass every edit/write/bash path (and any loaded module's root) as the absolute worktree path, and confirm with `git status --porcelain` in that worktree after the first write — a relative path can resolve against a different checkout while the tool reports success.
+- G-19: WHEN a test exercises git rename/copy-status parsing (git mv then reading --find-renames --name-status) DO keep content unchanged across the move, or assert via git status that git reports R/C — rewriting the body in one step defeats the similarity heuristic, so git reports delete+add and the rename branch stays untested.
 ## Outcomes (max 10)
-
+- O-01: WHEN a true, low-risk finding needs a source edit after the gate that would review it has already passed DO backlog it, not apply — a correct finding's disposition turns on its place in the gate sequence, not on correctness alone.
+- O-02: WHEN a task's dispatch or intent reads like a complete, detailed spec DO treat that completeness itself as a red flag — the more finished the spec looks, the stronger the pull to transcribe it straight into production code before a test exists. Write the failing test first regardless.
+- O-03: WHEN a prior open_question sits unresolved across a scope-changing amendment DO re-check it against the NEW scope before re-raising it — a scope change can retroactively resolve a question raised under the old scope without anyone touching the file the question named.
+- O-04: WHEN a pinned base commit no longer matches current HEAD mid-task DO confirm the pinned commit is still an ancestor of HEAD before treating the drift as a defect — a concurrent process committing to the same checkout is a normal, non-error cause, not evidence of an action you took.
+- O-05: WHEN a task's verification step requires writing to a file outside your own domain DO route the write through that file's actual domain owner or request a scoped exception — domain and write guards correctly refuse a self-serve attempt regardless of the technical need.
+- O-06: WHEN `git status --porcelain` shows changes outside your task's own file list DO report them as observed rather than reverting or investigating — they are likely concurrent sibling or tooling activity outside scope, unless they directly conflict with your own edits.
+- O-07: WHEN a new file is instructed to match an existing file's shape exactly DO import shared scaffolding (path/env resolution, counters) rather than reproduce it line-for-line — two duplicated copies need lockstep edits, and the newer, less-visited file is the one an editor forgets to update.
+- O-08: WHEN the same rule is restated across genuinely independent consumer types (an LLM prompt, an agent definition, an enforcement script, a decision log) DO check whether any single mechanism could span all of them before calling it drift — no shared-constant span means the repetition is load-bearing, not duplication.
+- O-09: WHEN a REUSE/SIMPLIFICATION reading proposes deleting a call as duplicate validation DO trace what each call site actually asserts, not just its name or error text — two calls sharing wording can validate different fields, and deleting the 'duplicate' can drop the only check for one of them.
+- O-10: WHEN recording pre-edit RED evidence for a review or QA audience DO make it independently reproducible at the pin — a committed failing test, not solely a receipt's prose narrating a since-restored mutation cycle — a downstream reader who cannot reconstruct your RED run cannot verify the claim it supports.
 ## Open (max 5)

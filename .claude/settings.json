@@ -34,6 +34,14 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/harness/bin/bash-write-guard.sh"
+          },
+        {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/harness/bin/gh-close-gate.sh"
+          },
+        {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/harness/bin/plan-sign-gate.sh"
           }
         ]
       },

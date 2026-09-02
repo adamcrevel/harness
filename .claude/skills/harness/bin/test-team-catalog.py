@@ -35,14 +35,14 @@ except ModuleNotFoundError:
         print("test-team-catalog: PyYAML is not importable from this interpreter "
               f"({sys.executable}).\n"
               "  install:  python3 -m pip install --user --break-system-packages pyyaml\n"
-              "  This is REQUIRED, not optional (DEC-171 am.1).", file=sys.stderr)
+              "  This is REQUIRED, not optional (DEC-171).", file=sys.stderr)
         sys.exit(1)
 
-REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+REPO = (os.environ.get("HARNESS_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR")) or os.getcwd()
 TEAMS = os.path.join(REPO, ".claude", "skills", "harness", "teams")
 BIN = os.path.join(REPO, ".claude", "skills", "harness", "bin")
 SKILL_MD = os.path.join(REPO, ".claude", "skills", "harness", "SKILL.md")
-SPEC_MD = os.path.join(REPO, "docs", "harness", "SPEC.md")
+SPEC_MD = os.path.join(REPO, ".harness", "harness", "docs", "SPEC.md")
 
 fails = 0
 ran = 0

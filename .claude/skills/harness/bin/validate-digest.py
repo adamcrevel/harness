@@ -22,15 +22,18 @@ Exit 0 = valid.  Exit 1 = contract violation (reasons on stdout).
 A violation routes into the BLOCKED (contract violation) path SPEC 8.3 already
 defines. Never guess a verdict — silent misrouting is worse than a halt.
 """
-import sys, re, os, json
+import sys, re, os, json, subprocess
 
 # Same directory as this script; sys.path[0] is that directory under `python3 <path>`.
 # The placeholder vocabulary lives there so INV-6 and this check cannot drift (issue #16).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import harness_boundary
 import harness_yaml
+from code_grade import classify, commit_oid, gated_set
+from gate_policy import GatePolicyError, evaluate_review, load_policy
 
 VERDICTS = {"PASS", "FAIL", "BLOCKED", "ESCALATE"}
-SEV      = ["info", "low", "med", "high", "critical"]
+SEV      = ["none", "low", "med", "high", "critical"]
 
 # Required of EVERY persona — the universal return contract (harness-handoff).
 UNIVERSAL = {"open_questions": list, "files_touched": list, "expertise_update": list}
@@ -116,6 +119,46 @@ GATE_FAIL_VALUES = {"dev": {"suite": "fail", "task_verify": "fail"},
 # dispatch-carries-the-T-NN-id rule (T-05) gives a cross-reference to.
 CONDITIONAL = {"task_verify": "task"}
 
+# A field whose obligation is lifted by what the return BOTH DECLARED and DID.
+# An ANALYSIS dispatch -- read this, report that -- writes no production code, so the
+# Iron Law binds on nothing: there is no code owed a passing test, and `suite` has no
+# gate to decline. Before this, such a return had NO truthful digest. MEASURED
+# 2026-08-26: three of four member runs lost their report body to the re-prompt, and
+# TWO agents reasoned themselves into a fabricated `suite: pass` to satisfy the schema.
+# A schema that teaches agents to misreport the record is worse than no schema.
+#
+# BOTH CONDITIONS, NEVER ONE. Each closes the other's hole, and both holes were real:
+#
+#   `task: none` alone       a CLAIM about the dispatch. A return can write it and
+#                            still edit ten files, and the Iron Law would be bypassed
+#                            on code that exists.
+#   `files_touched: []` alone a dev handed a REAL task that REFUSED it also touches
+#                            nothing, and its PASS is unearned. The case
+#                            "suite: n/a with VERDICT PASS is a fail-open" pins that
+#                            exact return -- `task: T-01`, `files_touched: []` -- and
+#                            it MUST stay rejected.
+#
+# Only the pair separates "had nothing to test" from "declined to test".
+NOTHING_TO_GATE = {"dev": {"suite"}}
+
+
+def _nothing_to_gate(field, persona, seen):
+    """True when this return declared no task AND changed no file, so `field` would
+    gate work that does not exist.
+
+    FAILS CLOSED on anything unexpected -- a missing, unparsed or non-list
+    `files_touched`, or any `task` value other than the literal `none`, leaves the
+    gate BINDING. The default in the `task` read is load-bearing for the same reason
+    `_unbound`'s is: `str(None).lower()` is `"none"` in Python, so a MISSING `task`
+    written without it would switch the requirement off.
+    """
+    if field not in NOTHING_TO_GATE.get(persona, ()):
+        return False
+    if str(seen.get("task", "")).strip().lower() != "none":
+        return False
+    touched = seen.get("files_touched")
+    return isinstance(touched, list) and not touched
+
 def _unbound(field, seen):
     """True when `field`'s governor declares this dispatch carries no PLAN task.
 
@@ -170,7 +213,7 @@ SCHEMAS = {
     # session routes on when the orchestrator returns: `status` decides relay vs.
     # done, `runs`/`cycles_used` are the budget accounting it logs, and
     # `briefing` is the path it presents to the user. Everything else stays on disk
-    # in feature.yaml.
+    # in feature.json.
     #
     # The money field this schema used to require is GONE, and a return still
     # carrying it is IGNORED rather than rejected — unknown keys are ignored
@@ -184,6 +227,14 @@ SCHEMAS = {
                       "runs": list, "cycles_used": int,
                       "briefing": str},
 }
+
+
+def review_config_path(config_path=None):
+    """Resolve the gate config once, with a fixture override for tests."""
+    if config_path is not None:
+        return config_path
+    root = harness_boundary.resolve_root(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, ".harness", "harness.json")
 ALIAS = {
     "harness-pm": "pm", "harness-qa": "qa", "harness-documentor": "documentor",
     "harness-dev-ops": "dev-ops", "harness-visual-designer": "visual-designer",
@@ -487,12 +538,613 @@ def parse_digest(text):
     return out
 
 
-def validate(persona, text):
+def _repo_root_for_feature(feature_dir):
+    """The checkout root that owns `feature_dir`.
+
+    A feature directory is always `<root>/.harness/<repo>/features/<FEAT>`, so its root
+    is four levels up. THIS IS THE ONE REPOSITORY BASIS every mechanical operation in
+    this module uses: the default-branch lookup, the merge base, every commit
+    resolution, the canonical diff and `gated_set()` all receive it explicitly, by
+    `git -C` or as `commit_oid`'s `repo_root`. BUG-1081: deriving any of them from
+    ambient cwd or from this file's installed location gave the grade a different
+    repository from the one the review pin belongs to — two bases, not one.
+    """
+    return os.path.realpath(os.path.join(feature_dir, "..", "..", "..", ".."))
+
+
+def resolve_reviewed_commit(root, revision):
+    """Resolve an untrusted review revision to a commit OID in `root`, or None.
+
+    `root` is the checkout that owns the feature under review
+    (`_repo_root_for_feature`) — never the process cwd. `commit_oid` refuses an
+    option-like revision before Git is ever invoked.
+    """
+    try:
+        return commit_oid(root, revision).encode()
+    except ValueError:
+        return None
+
+
+def reviewed_python_change(root, reviewed):
+    """Return whether the review range changes Python, or a blocking range error."""
+    if not isinstance(reviewed, str) or reviewed.count("..") != 1:
+        return None, "reviewed range must name exactly one base..head range."
+    base, head = (part.strip() for part in reviewed.split(".."))
+    if not base or not head:
+        return None, "reviewed range must name non-empty base and head revisions."
+    base_oid = resolve_reviewed_commit(root, base)
+    head_oid = resolve_reviewed_commit(root, head)
+    if base_oid is None or head_oid is None:
+        return None, "reviewed range could not be resolved to commit revisions."
+    result = subprocess.run(
+        ["git", "-C", root, "diff", "--name-only", "-z", base_oid, head_oid, "--"],
+        capture_output=True,
+    )
+    if result.returncode:
+        return None, "reviewed range could not be diffed for code-grade enforcement."
+    return any(path.endswith(b".py") for path in result.stdout.split(b"\0") if path), None
+
+
+# BUG-1081: a `code_grade` claim is a CLAIM. FEAT-43 (SEC-01) bound the range a review
+# reports to the range the system of record says was reviewed, and wave 4 stopped the
+# digest choosing the base for the `n_a` decision — but for `pass`, `fail` and `grade_2`
+# nothing ever RAN the grader. A review therefore passed when `code-grade.py` was
+# skipped, crashed, or reported a blocking result as a clean one, which is issue #1081.
+#
+# What changes here: the mechanical result is COMPUTED, for every ordinary code review,
+# over `merge-base(<default branch>, review_sha)..review_sha` — a range the REPOSITORY
+# derives with no digest input — and the digest's enum is REJECTED when it disagrees.
+# The reviewer keeps every judgement that is judgement: findings, `must_fix`, severity,
+# grade-2 reasons and the review policy, none of which this touches.
+#
+# The digest's own `reviewed` field is still validated (shape, and both revisions
+# resolvable — still catching a malformed or option-like/injection revision) and its
+# HEAD is still bound to `review_sha`. Its RESULT still decides nothing: Q8's ruling
+# that "the digest's base becomes a reported value that is cross-checked, never an
+# input that decides" is unchanged, and now holds for all four enum values rather than
+# for `n_a` alone.
+#
+# Availability is deliberately traded for enforcement (D-05). FEAT-43 carved `pass`,
+# `fail` and `grade_2` OUT of base derivation so an unresolvable default branch could
+# not brick reviewer validation generally; that carve-out is exactly the bypass, because
+# a checkout that cannot derive the repository-owned range cannot prove ANY mechanical
+# result. Every derivation or grading failure now REFUSES the digest and names the
+# repair. Reviews already require `origin/main` for the reviewer's own command, so the
+# honest response is to repair `origin/HEAD` or the review pin and rerun.
+_GRADE_PREFIX = "code_grade cannot be verified: "
+
+CODE_GRADE_VALUES = {"pass", "fail", "grade_2", "n_a"}
+
+
+def _git_line_or_none(root, *args):
+    """One stripped line of `git -C root <args>`, or None on any failure — a missing
+    ref, a non-zero exit, or `git` unavailable. Addressed with `-C` so every lookup in
+    this module resolves against the checkout that owns the feature under review."""
+    try:
+        result = subprocess.run(["git", "-C", root, *args],
+                                text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    return result.stdout.strip() or None
+
+
+def _default_branch_or_none(root):
+    """`root`'s default branch — `origin/HEAD`'s target, e.g.
+    `refs/remotes/origin/main` — or None when it cannot be resolved: no such
+    remote-tracking ref, a checkout that never set one, or `git` unavailable.
+    `origin/HEAD` is set once, at clone time, by whoever created the checkout — never a
+    value a digest or a review can name."""
+    return _git_line_or_none(root, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+
+
+def _merge_base_or_none(root, ref_a, ref_b):
+    """`git -C root merge-base ref_a ref_b`, or None on any failure — no common
+    ancestor, an unresolvable ref, or `git` unavailable."""
+    return _git_line_or_none(root, "merge-base", ref_a, ref_b)
+
+
+def _canonical_review_range(root, review_sha):
+    """The range the REPOSITORY owns for this review, as `(base_oid, head_oid, error)`.
+
+    `merge-base(<default branch>, review_sha)..review_sha` — never a range a digest
+    names, because a digest-chosen base decides which functions get graded. FAILS
+    CLOSED on four narrow conditions, each with its own repair: an unresolvable default
+    branch, a `review_sha` that does not resolve, no merge base, and a DEGENERATE range
+    (`review_sha` already an ancestor of the default branch), which is empty by
+    construction and is zero evidence that nothing changed rather than proof that it
+    did not. None of the four ever returns a result.
+    """
+    default_ref = _default_branch_or_none(root)
+    if default_ref is None:
+        return None, None, (_GRADE_PREFIX + "this checkout's default branch "
+                            "(origin/HEAD) could not be resolved, so the range the "
+                            "repository reviews cannot be derived — repair "
+                            "origin/HEAD in this checkout and rerun.")
+    head_oid = resolve_reviewed_commit(root, review_sha)
+    if head_oid is None:
+        return None, None, (_GRADE_PREFIX + f"this feature's recorded review_sha "
+                            f"({review_sha!r}) does not resolve to a commit — re-pin "
+                            f"review_sha in feature.json and rerun.")
+    head_oid = head_oid.decode()
+    base_oid = _merge_base_or_none(root, default_ref, head_oid)
+    if base_oid is None:
+        return None, None, (_GRADE_PREFIX + "no merge base between the default branch "
+                            "and review_sha could be computed, so the range the "
+                            "repository reviews cannot be derived — fetch the default "
+                            "branch into this checkout and rerun.")
+    if base_oid == head_oid:
+        return None, None, (_GRADE_PREFIX + f"review_sha ({review_sha}) is already an "
+                            f"ancestor of the default branch, so the derived review "
+                            f"range is empty BY CONSTRUCTION — that is zero evidence "
+                            f"nothing changed. Re-pin review_sha at the reviewed work "
+                            f"and rerun.")
+    return base_oid, head_oid, None
+
+
+def _load_test_kinds(root):
+    """`root`'s own `.harness/harness.json` `test_kinds` policy, as
+    `(test_kinds, error)`.
+
+    Read from the checkout under review, never from `review_config_path()`: the review
+    policy and the grade bars are different configuration with different owners, and the
+    bars must describe the repository actually being graded. A missing or empty policy
+    is a named refusal, never an implicit production bar.
+    """
+    path = os.path.join(root, ".harness", "harness.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, (_GRADE_PREFIX + f"{path} could not be read ({exc}), so this "
+                      f"checkout's grade bars are unknown — repair harness.json "
+                      f"and rerun.")
+    kinds = doc.get("test_kinds") if isinstance(doc, dict) else None
+    if not isinstance(kinds, dict) or not kinds:
+        return None, (_GRADE_PREFIX + f"{path} carries no test_kinds policy, so a "
+                      f"production path cannot be told from a test path — repair "
+                      f"harness.json and rerun.")
+    return kinds, None
+
+
+def _classify_canonical_range(root, base_oid, head_oid, test_kinds):
+    """`code_grade.classify` over the canonical range's gated functions, as
+    `(result, error)`.
+
+    Every grading failure — a committed Python file that does not parse above all —
+    becomes a NAMED refusal here and never a traceback: a crash that escaped this
+    boundary would be indistinguishable from a hook defect (DEC-127) and would leave
+    the claim ungraded, which is the state BUG-1081 removes.
+    """
+    try:
+        gated, _informational = gated_set(root, base_oid, head_oid)
+        _records, result = classify(gated, test_kinds)
+    except SyntaxError as exc:
+        return None, (_GRADE_PREFIX + f"committed Python in "
+                      f"{base_oid[:12]}..{head_oid[:12]} does not parse "
+                      f"({exc.msg}, line {exc.lineno}) — fix the committed syntax "
+                      f"error and rerun.")
+    except Exception as exc:
+        return None, (_GRADE_PREFIX + f"grading {base_oid[:12]}..{head_oid[:12]} "
+                      f"failed ({type(exc).__name__}: {exc}).")
+    return result, None
+
+
+def _mechanical_code_grade(root, review_sha):
+    """The result the REPOSITORY computes for this review, as
+    `(result, range_text, error)` — the value a `code_grade` claim is CHECKED against
+    rather than trusted (REQ-01).
+
+    `n_a` is decided here and only here: the canonical range changed no `.py` path at
+    all. A deletion-only Python range is NOT `n_a` (D-04) — a Python path changed, there
+    is simply no head-side function left to gate, so it grades `pass`. Everything else
+    goes to `code_grade.classify`, which owns the bars and the fail > grade_2 > pass
+    precedence and never returns `n_a`.
+    """
+    base_oid, head_oid, error = _canonical_review_range(root, review_sha)
+    if error:
+        return None, None, error
+    range_text = f"{base_oid}..{head_oid}"
+    changed, error = reviewed_python_change(root, range_text)
+    if error:
+        return None, range_text, error
+    if not changed:
+        return "n_a", range_text, None
+    test_kinds, error = _load_test_kinds(root)
+    if error:
+        return None, range_text, error
+    result, error = _classify_canonical_range(root, base_oid, head_oid, test_kinds)
+    return result, range_text, error
+
+
+def code_grade_enforcement_error(text, reviewed, code_grade, feature_dir=None):
+    """REQ-01: check a code reviewer's `code_grade` claim against the result this
+    repository computes, and refuse the digest when they disagree.
+
+    Plan reviews (DEC-207) never reach here — a pending plan has no code diff and no
+    `review_sha`, and grading is not invoked for them at all (REQ-06/D-06). Returns an
+    error string, or None when the claim matches.
+    """
+    feature_dir, error = _resolve_feature_dir(text, feature_dir)
+    if error:
+        return error
+    review_sha, error = _read_review_sha(feature_dir)
+    if error:
+        return error
+    root = _repo_root_for_feature(feature_dir)
+    _discarded, shape_error = reviewed_python_change(root, reviewed)
+    if shape_error:
+        return shape_error
+    expected, range_text, error = _mechanical_code_grade(root, review_sha)
+    if error:
+        return error
+    if expected == code_grade:
+        return None
+    return (f"code_grade={code_grade!r} disagrees with the mechanical result this "
+            f"repository computes over {range_text}: expected {expected!r}. The "
+            f"reviewer's enum is an audit claim, not evidence of itself — rerun "
+            f"code-grade.py over the canonical range and report what it reports.")
+
+
+FEATURE_DIR_IN_ARTIFACT_RE = re.compile(r"(\.harness/[^/\s]+/features/[^/\s]+)(?:/|$)")
+
+
+def _contained_feature_dir(root, relative):
+    r"""`(dir, error)` for a captured `.harness/<repo>/features/<FEAT>` path — the ONE
+    place that decides the artifact line names a directory INSIDE `root`.
+
+    `[^/\s]+` matches `..`, so `.harness/../features/..` satisfied the pattern and
+    `_repo_root_for_feature`'s four `..` segments then resolved a DIFFERENT git work
+    tree — measured, against this checkout, resolving to the parent repository that
+    shares its object store. That redirected the review_sha read and every grading
+    `git -C` call at once, which makes both sides of the binding digest-chosen and
+    defeats REQ-02 exactly. Two checks, because they fail on different things:
+
+      - No `.` or `..` segment. With the four segments plain, `_repo_root_for_feature`
+        returns `root` BY CONSTRUCTION rather than by coincidence.
+      - The resolved path is a strict descendant of `root`. This is what a symlinked
+        `.harness` or `<repo>` component would defeat, which the token check cannot see.
+
+    The returned path is the literal join, NOT its realpath: callers compare it against
+    paths they built the same way, and on macOS a temp root resolves through
+    `/private`, so returning a realpath here would silently break that comparison.
+    """
+    if any(segment in (".", "..") or not segment for segment in relative.split("/")):
+        return None, (f"code_grade cannot be bound to review_sha: artifact path "
+                       f"{relative!r} contains a relative segment — write your review "
+                       f"under this feature's own .harness/<repo>/features/<FEAT>/notes/ "
+                       f"directory, not a path that traverses out of it.")
+    feature_dir = os.path.join(root, relative)
+    real_root = os.path.realpath(root)
+    if not os.path.realpath(feature_dir).startswith(real_root + os.sep):
+        return None, (f"code_grade cannot be bound to review_sha: artifact path "
+                       f"{relative!r} resolves outside this checkout, so the feature "
+                       f"it names is not the one under review.")
+    return feature_dir, None
+
+
+def _feature_dir_from_artifact(text, root):
+    """The `.harness/<repo>/features/<FEAT>` directory named by this RETURN'S OWN
+    `artifact:` line — the only field SEC-01 trusts to say which feature a
+    reviewer belongs to, since every `harness-code-reviewer` writes its artifact
+    under that path (SPEC 8) and it is never a persona-chosen field an attacker
+    could point elsewhere. Split out of `resolve_review_sha` so the "WHICH
+    feature" half of the lookup grades independently of the "WHAT it pins" half.
+
+    Matching the pattern is NOT enough to trust the path; `_contained_feature_dir`
+    is what decides it names a directory inside `root`.
+
+    Returns `(dir, error)`.
+    """
+    m = None
+    for mm in re.finditer(r"^\s*artifact:\s*(\S+)", text, re.M):
+        m = mm
+    if not m:
+        return None, ("code_grade cannot be bound to review_sha: no artifact: "
+                       "line to resolve this feature from.")
+    path = strip_comment(m.group(1)).strip("\"'").replace(os.sep, "/")
+    fm = FEATURE_DIR_IN_ARTIFACT_RE.search(path)
+    if not fm:
+        return None, (f"code_grade cannot be bound to review_sha: artifact "
+                       f"{path!r} does not name a "
+                       f".harness/<repo>/features/<FEAT>/ location — write your "
+                       f"review under that feature's notes/.")
+    return _contained_feature_dir(root, fm.group(1))
+
+
+def _resolve_feature_dir(text, feature_dir=None):
+    """The `.harness/<repo>/features/<FEAT>` directory this review is bound to:
+    `feature_dir` when given (fixture-override seam, mirrors
+    `review_config_path`'s `config_path`), otherwise derived from the digest's
+    own `artifact:` line via `_feature_dir_from_artifact`. Factored out so both
+    `resolve_review_sha` (the SHA half) and the branch corroboration below (the
+    checkout half) resolve the SAME feature, never two independent guesses.
+
+    Returns `(dir, error)`.
+    """
+    if feature_dir is not None:
+        return feature_dir, None
+    root = _root_or_none()
+    if root is None:
+        return None, ("code_grade cannot be bound to review_sha: no checkout "
+                       "root resolves from this vantage, so the claim is not "
+                       "trusted.")
+    return _feature_dir_from_artifact(text, root)
+
+
+def _read_review_sha(feature_dir):
+    """feature.json's `review_sha`, or `(None, error)` when it is unreadable or
+    unpinned (DEC-121/INV-6 placeholder vocabulary)."""
+    fj_path = os.path.join(feature_dir, "feature.json")
+    try:
+        with open(fj_path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, (f"code_grade cannot be bound to review_sha: {fj_path} "
+                       f"could not be read ({e}), so the claim is not trusted.")
+    sha = doc.get("review_sha") if isinstance(doc, dict) else None
+    if not isinstance(sha, str) or sha.strip().lower() in harness_yaml.PLACEHOLDER_UNSET:
+        return None, (f"code_grade cannot be bound to review_sha: {fj_path} has "
+                       f"no pinned review_sha — an unpinned feature (INV-6) "
+                       f"cannot anchor a code_grade claim.")
+    return sha.strip(), None
+
+
+_BRANCH_UNSET = object()  # sentinel: no branch_override given -> derive from git
+
+
+def _read_feature_branch(feature_dir):
+    """feature.json's `branch` field, or None when absent, `none`, or the file
+    is unreadable. Unlike `_read_review_sha`, this is NOT a fail-closed read:
+    SEC-01's SHA binding already rejects an unreadable/unpinned feature.json
+    elsewhere, and a legitimate feature.json may genuinely carry no branch
+    (`branch: none` — e.g. FEAT-01, FEAT-15, FEAT-19 in this repo). "Cannot
+    tell" here must mean "nothing to corroborate", never "reject".
+    """
+    fj_path = os.path.join(feature_dir, "feature.json")
+    try:
+        with open(fj_path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    branch = doc.get("branch") if isinstance(doc, dict) else None
+    if not isinstance(branch, str) or branch.strip().lower() in harness_yaml.PLACEHOLDER_UNSET:
+        return None
+    return branch.strip()
+
+
+def _current_branch_or_none(branch_override=_BRANCH_UNSET, feature_dir=None):
+    """The branch of the checkout that owns `feature_dir`, or None when unknown."""
+    if branch_override is not _BRANCH_UNSET:
+        return branch_override
+    root = _root_or_none() if feature_dir is None else _repo_root_for_feature(feature_dir)
+    if root is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True, capture_output=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode:
+        return None
+    branch = result.stdout.strip()
+    return branch if branch and branch != "HEAD" else None
+
+
+def _branch_corroboration_error(feature_dir, current_branch):
+    """SEC-01 hardening (wave 3): the digest's own `artifact:` line still picks
+    WHICH feature.json's review_sha a claim is bound to (SEC-01's residual
+    hole) — a reviewer can point `artifact:` at a different shipped feature
+    and reuse ITS pin. This corroborates against the one thing no digest
+    controls: the checkout the validator is actually running in. ADDITIVE
+    ONLY — it may turn an accept into a reject, never the reverse — so either
+    side being unknown means "nothing to corroborate", not "reject":
+      - `current_branch` is None (undeterminable checkout): behave as today.
+      - the feature's `branch` is None (absent or `none`, a real recorded
+        state — FEAT-01/15/19): behave as today.
+    Only a REAL, DIFFERENT branch name on both sides rejects.
+    """
+    if current_branch is None:
+        return None
+    feature_branch = _read_feature_branch(feature_dir)
+    if feature_branch is None:
+        return None
+    if feature_branch == current_branch:
+        return None
+    return (f"code_grade cannot be bound to review_sha: this feature's "
+            f"recorded branch ({feature_branch!r}) does not match the current "
+            f"checkout's branch ({current_branch!r}) — the digest's artifact: "
+            f"line must name the feature actually under review in this "
+            f"checkout, not another shipped feature's notes/ path.")
+
+
+def _parse_reviewed_range(reviewed):
+    """Split `reviewed` into `(base, head, None)`, or `(None, None, error)` on a
+    malformed range — the same shape rules `reviewed_python_change` enforces on the
+    canonical range,
+    factored out so `code_grade_bound_to_review` stays a flat sequence of checks."""
+    if not isinstance(reviewed, str) or reviewed.count("..") != 1:
+        return None, None, "reviewed range must name exactly one base..head range."
+    base, head = (part.strip() for part in reviewed.split(".."))
+    if not base or not head:
+        return None, None, "reviewed range must name non-empty base and head revisions."
+    return base, head, None
+
+
+_PLAN_REVIEW_PREFIX = "plan:"
+
+
+def _is_plan_review(reviewed):
+    return isinstance(reviewed, str) and reviewed.startswith(_PLAN_REVIEW_PREFIX)
+
+
+def _resolve_plan_review_path(reviewed):
+    named_path = reviewed[len(_PLAN_REVIEW_PREFIX):].strip()
+    if not named_path:
+        return None, "reviewed plan target is empty — write plan:<path-to-plan.yaml>."
+    if os.path.isabs(named_path):
+        return os.path.realpath(named_path), None
+    root = _root_or_none()
+    if root is None:
+        return None, "reviewed plan target cannot be resolved from this checkout."
+    return os.path.realpath(os.path.join(root, named_path)), None
+
+
+def _pending_plan_status_error(plan_path):
+    try:
+        plan = harness_yaml.load_file(plan_path)
+    except Exception as exc:
+        return f"reviewed plan target {plan_path!r} could not be read ({exc})."
+    approval = plan.get("approval") if isinstance(plan, dict) else None
+    status = approval.get("status") if isinstance(approval, dict) else None
+    if status == "pending":
+        return None
+    return (f"plan review mode is only valid while approval.status is pending; "
+            f"{plan_path!r} records {status!r}.")
+
+
+def _pinned_feature_review_error(feature_dir):
+    feature_json = os.path.join(feature_dir, "feature.json")
+    if not os.path.exists(feature_json):
+        return None
+    try:
+        with open(feature_json, encoding="utf-8") as handle:
+            feature = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return f"pre-signature feature record {feature_json!r} is unreadable ({exc})."
+    review_sha = feature.get("review_sha") if isinstance(feature, dict) else None
+    if not isinstance(review_sha, str) \
+            or review_sha.strip().lower() in harness_yaml.PLACEHOLDER_UNSET:
+        return None
+    return ("plan review mode is pre-signature only, but feature.json already "
+            "has a pinned review_sha.")
+
+
+def _pending_plan_review_error(text, reviewed, code_grade, feature_dir, branch_override):
+    """Bind DEC-207's pre-signature review to its pending plan and checkout."""
+    feature_dir, dir_error = _resolve_feature_dir(text, feature_dir)
+    if dir_error:
+        return dir_error
+    if code_grade != "n_a":
+        return "a plan review has no code diff; code_grade must be 'n_a'."
+    plan_path, path_error = _resolve_plan_review_path(reviewed)
+    if path_error:
+        return path_error
+    expected_path = os.path.realpath(os.path.join(feature_dir, "plan.yaml"))
+    if plan_path != expected_path:
+        return (f"reviewed plan target {plan_path!r} is not this feature's "
+                f"plan.yaml ({expected_path}).")
+    return (
+        _pending_plan_status_error(plan_path)
+        or _pinned_feature_review_error(feature_dir)
+        or _branch_corroboration_error(
+            feature_dir, _current_branch_or_none(branch_override, feature_dir)
+        )
+    )
+
+
+def _skipped_member_error(fields):
+    """Validate the one optional external member that may legitimately not run."""
+    status = fields.get("status")
+    if status is None:
+        return False, None
+    if str(status).lower() != "skipped":
+        return False, f"member status {status!r} must be exactly 'skipped' when present."
+    if fields.get("verdict"):
+        return True, "a skipped member did not run and must not also claim a verdict."
+    if not str(fields.get("persona", "")).strip():
+        return True, "a skipped member must name its persona."
+    if not str(fields.get("reason", "")).strip():
+        return True, "a skipped member must name the host reason it did not run."
+    if fields.get("persona") != "fable-advisor":
+        return True, ("only the optional fable-advisor may be recorded as skipped; "
+                      "mandatory members must carry their verdict.")
+    return True, None
+
+
+def code_grade_bound_to_review(text, reviewed, code_grade, feature_dir=None,
+                               branch_override=_BRANCH_UNSET):
+    """Bind a code review to review_sha, or a DEC-207 plan review to its pending plan.
+
+    The code path runs unconditionally for pass, fail, grade_2, and n_a: a forged
+    range must not describe a diff nobody reviewed. Plan mode is a distinct target,
+    not a missing SHA fallback, and accepts only code_grade n_a.
+
+    Only `head` is bound — `base` has no independent system-of-record value
+    today (batch contract). `head` is what varies between an honest review (it
+    equals `review_sha`) and a forged one (a convenient, resolvable stand-in
+    that is not).
+
+    Wave 3 hardening: even an honest head==review_sha binding still trusts the
+    digest's OWN `artifact:` line to pick WHICH feature.json supplied that
+    review_sha — a reviewer can point `artifact:` at a different shipped
+    feature and reuse ITS pin. `_branch_corroboration_error` closes that with
+    the one thing no digest controls: the checkout's actual current branch.
+
+    Returns an error string, or `None` when the binding holds.
+    """
+    if _is_plan_review(reviewed):
+        return _pending_plan_review_error(
+            text, reviewed, code_grade, feature_dir, branch_override
+        )
+    feature_dir, dir_error = _resolve_feature_dir(text, feature_dir)
+    if dir_error:
+        return dir_error
+    review_sha, sha_error = _read_review_sha(feature_dir)
+    if sha_error:
+        return sha_error
+    _base, head, range_error = _parse_reviewed_range(reviewed)
+    if range_error:
+        return range_error
+    root = _repo_root_for_feature(feature_dir)
+    head_oid = resolve_reviewed_commit(root, head)
+    if head_oid is None:
+        return "reviewed range could not be resolved to commit revisions."
+    pin_oid = resolve_reviewed_commit(root, review_sha)
+    if pin_oid is None:
+        return (f"code_grade cannot be bound to review_sha: this feature's "
+                f"recorded review_sha ({review_sha!r}) does not resolve to a "
+                f"commit.")
+    if head_oid != pin_oid:
+        return (f"reviewed head {head!r} does not resolve to this feature's "
+                f"pinned review_sha ({review_sha}) — write the range that ends "
+                f"at review_sha (feature.json), not a convenient no-op.")
+    return _branch_corroboration_error(
+        feature_dir, _current_branch_or_none(branch_override, feature_dir)
+    )
+
+
+def _missing_field_default_hint(field, allowed):
+    """The hint for a missing field that has no other tailored branch in
+    `validate`'s field loop — `[]` unless the field is a single-value ENUM
+    SCALAR (currently only `code_grade`), which needs its legal values named
+    instead. Isolated here, not as a new elif in `validate`, so this fix does
+    not grow a function already far past the grade bar (pre-existing).
+    """
+    if field == "code_grade":
+        vals = sorted(a for a in allowed if isinstance(a, str))
+        return f"one of {vals} — a single enum value, never a list"
+    return "`[]` if there are none"
+
+
+def validate(persona, text, config_path=None, feature_dir=None, branch_override=_BRANCH_UNSET):
     err = []
+    raw_persona = persona
     persona = norm(persona)
     schema = SCHEMAS.get(persona)
     if schema is None:
         return [f"unknown persona {persona!r} — cannot validate; refusing to pass it."]
+    if raw_persona == "harness-code-reviewer":
+        # CANONICAL SPELLING (batch contract, wave 2): a gated record that is below
+        # bar and NOT grade 2 — one that blocks the build exactly as grade 1 does —
+        # is reported by code_grade.py at severity `high` and is spelled here
+        # `code_grade: fail`. There is no fifth enum value; `fail` already carries
+        # that meaning and is reused rather than added to.
+        schema = {**schema, "code_grade": set(CODE_GRADE_VALUES),
+                  "reviewed": str}
 
     # Echo-shadowing fix (BUILD task 22 follow-up): agents sometimes echo the
     # harness-handoff template (a schema-valid VERDICT/DIGEST block) before their
@@ -517,6 +1169,9 @@ def validate(persona, text):
         err.append("no artifact: path.")
 
     seen = parse_digest(text)
+    review_policy = None
+    if raw_persona == "harness-code-reviewer":
+        review_policy = load_policy(review_config_path(config_path))["review"]
 
     # F7: `headline` must be at the DIGEST block's OWN level, read from `seen` (which
     # only holds base-indent keys) rather than matched anywhere in the text at any
@@ -575,9 +1230,17 @@ def validate(persona, text):
             elif field in NULLABLE:
                 hint = "`none` if genuinely not applicable"
             else:
-                hint = "`[]` if there are none"
-            # HONEST LIMIT: a re-prompted return is not re-validated — `:838` is
-            # `if d.get("stop_hook_active"): return 0` — so a hint naming a rejectable
+                # `code_grade` is handled inside this helper rather than as its
+                # own elif here: `validate` is already far past the grade bar
+                # (pre-existing), and a single-value ENUM SCALAR like
+                # `code_grade` needs a hint naming its legal values, not the
+                # generic "`[]` if there are none" — which sent a reviewer who
+                # omitted it straight into a second, guaranteed rejection
+                # (REQ-11's own defect class). SC-19 stays intact: the field is
+                # still named literally in the outer message below.
+                hint = _missing_field_default_hint(field, allowed)
+            # HONEST LIMIT: a re-prompted return is not re-validated —
+            # `:845` is `if d.get("stop_hook_active"): return 0` — so a hint naming a rejectable
             # value ships the second attempt unvalidated. That passthrough is
             # pre-existing and deliberate; this edit stops the hint POINTING at it and
             # does not close it.
@@ -609,7 +1272,8 @@ def validate(persona, text):
             # DEC-173: declining a GATE while claiming PASS is the fail-open the
             # widened NULLABLE would otherwise have created. Reported here rather
             # than as a separate pass so the message lands next to the field.
-            if field in GATE_FIELDS.get(persona, ()) and m and m.group(1) == "PASS":
+            if field in GATE_FIELDS.get(persona, ()) and m and m.group(1) == "PASS" \
+                    and not _nothing_to_gate(field, persona, seen):
                 err.append(f"{field}={val!r} declines to report a gate, but VERDICT is "
                            f"PASS — a gate that did not run cannot have passed. Return "
                            f"BLOCKED or FAIL, or report the real result.")
@@ -674,11 +1338,47 @@ def validate(persona, text):
                        + (" (write the literal `none` if genuinely inapplicable)."
                           if field in NULLABLE else "."))
 
+    if raw_persona == "harness-code-reviewer":
+        code_grade = seen.get("code_grade")
+        reviewed = seen.get("reviewed")
+        # SEC-01 still runs before branching on the grade. DEC-207 adds one
+        # separately-bound target: plan:<path> for a pending pre-signature plan.
+        binding_error = code_grade_bound_to_review(
+            text, reviewed, code_grade, feature_dir, branch_override
+        )
+        if binding_error:
+            err.append(binding_error)
+        if code_grade in CODE_GRADE_VALUES and not _is_plan_review(reviewed):
+            # BUG-1081: the mechanical result is RECOMPUTED here, for every ordinary
+            # code review, and the digest's enum is rejected when it disagrees. Before
+            # this, only `n_a` was re-derived and `pass`/`fail`/`grade_2` were taken on
+            # the reviewer's word, so a skipped, crashed or misreported grader passed.
+            grade_error = code_grade_enforcement_error(
+                text, reviewed, code_grade, feature_dir)
+            if grade_error:
+                err.append(grade_error)
+        if code_grade == "grade_2":
+            reasons = seen.get("grade_2_reasons")
+            if not isinstance(reasons, list) or not reasons \
+                    or not all(isinstance(reason, str) and reason.strip()
+                               for reason in reasons):
+                err.append("code_grade='grade_2' requires non-empty grade_2_reasons.")
+        if code_grade == "fail" and m and m.group(1) == "PASS":
+            err.append("code_grade='fail' reports a gate as FAILED, but VERDICT is PASS — "
+                       "a gate that failed cannot have passed.")
+        must_fix = seen.get("must_fix")
+        severity_max = seen.get("severity_max")
+        if isinstance(must_fix, list) and severity_max in SEV \
+                and evaluate_review(review_policy, must_fix, severity_max) == "FAIL" \
+                and m and m.group(1) == "PASS":
+            err.append(f"review policy {review_policy!r} reports a gate as FAILED, but "
+                       "VERDICT is PASS — a gate that failed cannot have passed.")
+
     # --- LEAD ROLL-UP: the top verdict must be the WORST member verdict (SPEC 10.4).
     #
     # This is the only part of collation that is arithmetic rather than judgement, and
     # it was the one thing stated in prose with a validator sitting next to it that
-    # could check it and didn't — the DEC-19 / DEC-110 / DEC-119 shape exactly. A lead
+    # could check it and didn't — the DEC-110 / DEC-119 shape exactly. A lead
     # reporting PASS over a failing member is the single most consequential digest
     # error possible: the orchestrator routes on VERDICT and never opens member
     # entries (SPEC 8), so a masked FAIL ships.
@@ -705,6 +1405,12 @@ def validate(persona, text):
             worst, worst_src = None, None
             for item in members:
                 fields = parse_member_entry(str(item))
+                skipped, skip_error = _skipped_member_error(fields)
+                if skip_error:
+                    err.append(skip_error)
+                    continue
+                if skipped:
+                    continue
                 mv = fields.get("verdict")
                 if not mv:
                     # Their data, not our bug — the normative template carries a
@@ -723,6 +1429,9 @@ def validate(persona, text):
                     continue
                 if worst is None or RANK[v] > RANK[worst]:
                     worst, worst_src = v, str(item)[:60]
+            if worst is None:
+                err.append("members records no member actually ran — a lead verdict cannot "
+                           "claim an outcome for an entirely skipped team.")
             if worst and top in RANK and RANK[top] < RANK[worst]:
                 err.append(f"VERDICT is {top} but a member returned {worst} "
                            f"({worst_src!r}). The team verdict is the WORST member verdict "
@@ -741,6 +1450,38 @@ def validate(persona, text):
         err.append("open_questions is a COUNT; it must be a list of structured items — "
                    "it is an active routing signal, not a tally.")
     return err
+
+
+def _root_or_none():
+    """This checkout's root, from harness_boundary — or None if there is not one (FEAT-42
+    T-17).
+
+    NONE RATHER THAN A RAISE. Every caller here treats an unresolvable root as "the errand
+    could not be run", never as a verdict: this hook validates digests, and the registry and
+    the artifact-shape check are side errands that may not change what it returns.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import harness_boundary
+        return harness_boundary.resolve_root(
+            os.path.dirname(os.path.realpath(__file__)), strict=False)
+    except Exception:
+        return None
+
+def _hook_feature_dir(text, feature):
+    """Resolve an unmerged feature from an installed validator's owner checkout."""
+    owner_root = _root_or_none()
+    if owner_root is None or not feature:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import inflight_registry
+        checkout_root = inflight_registry.feature_root(owner_root, feature)
+        feature_dir, error = _feature_dir_from_artifact(text, checkout_root)
+        return None if error else feature_dir
+    except Exception:
+        return None
+
 
 def check_artifact_file(agent, text, payload):
     """DEC-156: a lead's WRITTEN digest.md must carry the same §10.4 block.
@@ -775,10 +1516,25 @@ def check_artifact_file(agent, text, payload):
         # artifact is INV-15's finding (it can see the run dir), not this hook's.
         return 0
 
-    cands = ([path] if os.path.isabs(path) else
-             [os.path.join(b, path) for b in
-              (payload.get("cwd"), os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()) if b])
-    found = next((p for p in cands if os.path.isfile(p)), None)
+    # ONE ROOT, NOT A CANDIDATE WALK (FEAT-42 T-17). Relative lead artifacts belong
+    # to the feature checkout named by this SubagentStop payload. Unlike the PreToolUse
+    # domain route, this hook already consumes harness_feature to resolve feature state;
+    # using it here follows that established input rather than creating a route dependency.
+    if os.path.isabs(path):
+        cands = [path]
+    else:
+        owner_root = _root_or_none()
+        base = owner_root
+        feature = payload.get("harness_feature")
+        if owner_root and feature:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+                import inflight_registry
+                base = inflight_registry.feature_root(owner_root, feature)
+            except Exception:
+                base = owner_root
+        cands = [os.path.join(base or "", path)]
+    found = next((candidate for candidate in cands if os.path.isfile(candidate)), None)
     if not found:
         print(f"check-digest: {agent}'s artifact {path} not found from the hook's vantage — "
               f"file-shape check skipped; check-state.sh INV-15 will audit it from repo root.",
@@ -801,12 +1557,17 @@ def check_artifact_file(agent, text, payload):
     return 2
 
 
+# Distinguishes an ABSENT `last_assistant_message` from one that is present and null.
+# Module level so hook_mode() allocates nothing per invocation.
+_ABSENT = object()
+
+
 def hook_mode():
     """SubagentStop hook: reject a malformed digest at source.
 
     Exit 2 "prevents the subagent from stopping", so the agent must fix its return
     before it can finish — enforcement rather than a request. This is the same
-    answer DEC-19 reached for domain enforcement: prose guarding a contract is
+    answer reached elsewhere for domain enforcement: prose guarding a contract is
     unenforceable, so a script guards it instead.
 
     THREE PASS-THROUGHS, each deliberate:
@@ -845,11 +1606,124 @@ def hook_mode():
     if d.get("stop_hook_active"):
         return 0
 
-    text = d.get("last_assistant_message") or ""
-    if not text.strip():
-        print(f"check-digest: {agent} returned no final message to validate — passing through.",
-              file=sys.stderr)
+    # -----------------------------------------------------------------------
+    # T-09 — issue #551. TWO steps, in THIS order: release first, then the
+    # return contract. Reversed, an agent refused at step two would never have
+    # its own claim released and would leak it until the TTL.
+    #
+    # NEITHER STEP MAY EVER CHANGE THE VERDICT. This hook validates digests;
+    # the registry is a side errand. Every failure below is swallowed and
+    # reported, never raised, never returned.
+    # -----------------------------------------------------------------------
+    _reg = None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import inflight_registry as _reg
+    except Exception as _e:
+        print(f"check-digest: inflight_registry unavailable ({_e!r}) — the #551 claim was "
+              f"neither released nor checked. This is our gap, not theirs.", file=sys.stderr)
+
+    if _reg is not None:
+        # THE ROOT COMES FROM THE ONE RESOLVER (FEAT-42 T-17), not from a walk starting at
+        # the payload cwd. The old note here said cwd had to come first so this released from
+        # the same registry dispatch-guard.sh wrote to — but that guard now takes its root
+        # from the DECLARED feature (T-18), not from where the dispatcher happened to stand,
+        # so the two agree without either of them reading a cwd. Nothing sets an agent's cwd,
+        # which is why it was never a root.
+        _root = _root_or_none()
+
+        if _root is None:
+            print("check-digest: no checkout root from this vantage — the #551 claim was "
+                  "neither released nor checked.", file=sys.stderr)
+        else:
+            # STEP ONE — THE RELEASE. OMP supplies feature and runtime identity, so its
+            # idempotent yield path can release exactly one claim even when the same persona
+            # is active in another feature. Claude Code retains the compatibility fallback.
+            _feature = d.get("harness_feature")
+            _agent_id = d.get("harness_agent_id")
+            _job_id = d.get("harness_job_id")
+            try:
+                _released = _reg.release(
+                    _root,
+                    agent=agent,
+                    feature=_feature,
+                    agent_id=_agent_id,
+                    job_id=_job_id,
+                )
+                if _released:
+                    print(f"check-digest: released the #551 claim for {agent}.",
+                          file=sys.stderr)
+            except Exception as _e:
+                print(f"check-digest: could not release {agent}'s claim ({_e!r}) — it will "
+                      f"expire or reconcile on supervisor loss. Not blocking on our own errand.",
+                      file=sys.stderr)
+
+            # STEP TWO — THE D-09 RETURN CONTRACT. Fires AT MOST ONCE per return, which is
+            # not a wait: a lead cannot be made to wait for its children, and D-09 records
+            # that as an impossibility rather than working around it. What this catches is
+            # FALSE REPORTING — occurrence 7 committed a verdict asserting a member's work
+            # was empty and unrecoverable while that member was still running and later
+            # returned PASS.
+            if norm(agent) in ("lead", "orchestrator"):
+                try:
+                    # THE SESSION FILTER IS THE FIX FOR THE CASCADE (FEAT-42 T-17, #742/#866).
+                    # A claim stranded by ANOTHER session is not a live child of THIS return.
+                    # Measured 2026-08-26: one stranded pm claim refused the pm spawn at
+                    # dispatch-guard, then refused the LEAD's return here, then refused the
+                    # ORCHESTRATOR's return here again — three tiers locked out of reporting
+                    # by one strand, each stranding creating the next.
+                    _kids = _reg.live_children(
+                        _root,
+                        agent,
+                        session=d.get("session_id"),
+                        feature=_feature,
+                    )
+                except Exception as _e:
+                    _kids = []
+                    print(f"check-digest: could not read children of {agent} ({_e!r}) — the "
+                          f"#551 return contract is not enforced for this return.",
+                          file=sys.stderr)
+                if _kids:
+                    for _line in _reg.children_refusal_lines(agent, _kids):
+                        print(_line, file=sys.stderr)
+                    # AND THE PRECISE REMEDY, ONE COMMAND PER STRANDED CHILD. The refusal
+                    # named the problem and no cure, so a reader reached for release-all —
+                    # which sets the registry to {} and wipes every claim of every agent.
+                    # On 2026-08-26 following that advice would have destroyed a live claim.
+                    try:
+                        print("  if one of these is stranded rather than running, release "
+                              "exactly it:", file=sys.stderr)
+                        for _persona, _c in _kids:
+                            print(
+                                "  %s" % _reg.release_cmd(
+                                    _root, _persona, feature=_c.get("feature")
+                                ),
+                                file=sys.stderr,
+                            )
+                    except Exception as _e:
+                        print(f"check-digest: could not compose the release command "
+                              f"({_e!r}).", file=sys.stderr)
+                    return 2
+
+    # PRESENCE, NOT TRUTHINESS. Absent, null and empty-string used to be ONE branch, so
+    # the PLATFORM's gap — nothing supplied to validate — and the PERSONA's contract
+    # violation — a final message that is blank — were indistinguishable, and both passed
+    # through at exit 0. Five empty returns in FEAT-45 were recovered only because leads
+    # re-measured by hand; nothing in the record said those returns had never been
+    # validated at all.
+    raw = d.get("last_assistant_message", _ABSENT)
+    if raw is _ABSENT or raw is None:
+        print(f"check-digest: {agent}'s return carries no last_assistant_message "
+              f"(absent or null) — this is our gap, not {agent}'s; the return was "
+              f"NOT VALIDATED.", file=sys.stderr)
         return 0
+    text = str(raw)
+    if not text.strip():
+        print(f"check-digest: {agent} returned an empty final message. A harness persona "
+              f"owes a structured return, and an empty one satisfies no field of the digest "
+              f"contract, so it cannot be accepted. Return again with the three-part "
+              f"VERDICT/DIGEST/artifact block.", file=sys.stderr)
+        return 2
 
     if norm(agent) not in SCHEMAS:
         print(f"check-digest: no schema for {agent} — passing through rather than "
@@ -863,7 +1737,12 @@ def hook_mode():
     # completely unvalidated with no signal at all. That is a worse outcome than
     # the "decline to govern" pass-throughs above, which at least say so.
     try:
-        errs = validate(agent, text)
+        errs = validate(agent, text, feature_dir=_hook_feature_dir(
+            text, d.get("harness_feature")
+        ))
+    except GatePolicyError as error:
+        print(f"check-digest: {error}", file=sys.stderr)
+        return 2
     except Exception as e:
         print(f"check-digest: internal error validating {agent}'s return ({e!r}) — "
               f"passing through; this is our bug, not theirs.", file=sys.stderr)

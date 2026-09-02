@@ -1,78 +1,45 @@
 # Expertise — harness-pm
-
 ## Patterns (max 15)
-- P-01: WHEN a `verify:` grep would already have passed before the change DO label it
-  non-discriminating and name a substitute command whose result only the change can produce.
-  An absence-grep that was already empty proves nothing. Exemplar: the `## Verify receipts`
-  section of a shipped plan under `.harness/features/`.
-- P-02: WHEN a criterion will cite automated evidence from a test kind DO check that kind's detect
-  globs match files on the surface being changed: a non-null runner matching zero files here is a
-  gate that proves nothing. Widen the runner as a task rather than downgrading the criterion to
-  inspection.
-- P-03: WHEN a criterion declares automated verification DO NOT admit a source-code reading as its
-  evidence — that converts it to inspection, and the method is fixed at approval. Name the passing
-  test, or return the criterion not met.
-- P-04: WHEN a criterion enumerates N clauses, shapes or personas DO count the enumerated items in
-  its own prose against the fixture cases, and diff a sibling criterion's fixture set against it.
-  Under-fixturing, not wrong behaviour, is the dominant defect — reading the implementation will
-  not show it.
-- P-05: WHEN grading a criterion DO grade its own full text: a leading claim broader than its
-  enumerated list still binds, and an enumeration delivered in part is not met, never partial.
-  Met on a method that cannot detect the failure it exists to detect is worse than unmet.
-- P-06: WHEN a task's dispositions are enumerated by a grep DO give one `verify:` clause a broader
-  pattern than the survey used, with the legitimate survivors listed as an allow-list. A site
-  outside the survey's token set is not merely unlisted, it is unfalsifiable.
-- P-07: WHEN drafting a criterion DO read it for presupposition against the criteria already
-  written. A clause asserting something about surviving occurrences presupposes they survive,
-  which negates any absence check over the same files. Each reads sound alone.
-- P-08: WHEN a task's `verify:` counts or forbids a token DO grep that same task's own intent prose
-  for the token before shipping the task. You author both halves, and the conflict is invisible on
-  reading — it appears only when someone runs the clause.
-- P-09: WHEN handed a claim that a test already covers a property DO mutate the tool to violate the
-  property and see which cases redden. Cited lines are often comments, not assertions. A mutant
-  that reddens every case is broken, not evidence of strong coverage.
-- P-10: WHEN an inspection criterion says where to look DO anchor it on content strings, never line
-  numbers. Anchors taken at the base commit rot inside a single feature's lifetime, leaving the
-  criterion unverifiable as written while the content it protects is intact.
-- P-11: WHEN a criterion names the mechanism behind a behaviour DO confirm the code uses that
-  mechanism before signature, or state the observable outcome instead. A criterion false only in
-  its mechanism routes as a fix cycle against working code, never as a re-signature.
-- P-12: WHEN a criterion presupposes a case exists in the data, such as a path granted by only one
-  pattern, DO enumerate that data for an unshadowed instance first. If every candidate is shadowed
-  by a broader entry, no fixture discriminates and the criterion is unprovable as written.
-- P-13: WHEN a criterion's clauses are verified DO count techniques, not clauses. Several source
-  greps share one blind spot, and a single idiom change defeats them together. Balanced clause and
-  fixture counts hide this. Give at least one clause a behavioural check.
-- P-14: WHEN a brief names a hazard DO probe the opposite input condition as well before planning
-  against it. The named half is the half someone already noticed; the unnamed half often fails
-  open, exiting clean where the named one fails loudly.
-
+- P-01: WHEN a `verify:` grep would already have passed before the change DO label it non-discriminating and name a substitute command whose result only the change can produce. An absence-grep that was already empty proves nothing. Exemplar: the `## Verify receipts` section of a shipped plan under `.harness/harness/features/`.
+- P-02: WHEN a criterion will cite automated evidence from a test kind DO check that kind's detect globs match files on the surface being changed: a non-null runner matching zero files here is a gate that proves nothing. Widen the runner as a task rather than downgrading the criterion to inspection.
+- P-03: WHEN a criterion's grading set is derived from the artifact under grading — the plan's own file lists — DO re-base it on a source that artifact cannot define, then name the concrete case that now fails it. Otherwise it is true by construction and can never fail.
+- P-04: WHEN a criterion quantifies over N items DO give each item its own assertion, in the verify you author and again when grading. A file-global search or a matching count is satisfied by the conformers alone, blind to the one item that conforms to nothing.
+- P-05: WHEN grading a criterion DO grade every clause against its own subject: a leading claim broader than the enumeration binds; a trailing gloss whose subject excludes the case does not. Part of an enumeration is not met. A method blind to the failure grades worse than unmet.
+- P-06: WHEN a criterion cannot be met DO decide whether the defect is in the code or in the sentence. If a retry could make it true, route a fix cycle. Otherwise escalate — never adopt a narrower reading yourself, even one a downstream gate upheld.
+- P-07: WHEN you write an ordering argument for a removal or migration sequence DO enumerate every gate that reads the changed surfaces and say what each does in each intermediate state. A one-gate argument reads as rigorous and is not; a missed second gate reddens the whole suite.
+- P-08: WHEN a task's verify counts a token, or its intent directs the doer to write a factual claim, DO run the verify's exact command against the intent prose and verify the claim at source. You author both halves; no sweep catches a correctly-spelled false claim.
+- P-11: WHEN a criterion quantifies over a scope DO check, before dispatch, that the tasks tracing to it carry file lists covering that scope. A task naming one file cannot satisfy a clause over every document, so the criterion fails at goal-check for a planning reason no retry can fix.
+- P-12: WHEN specifying a detector or sweep pattern DO derive it from the weakest fragment every target site necessarily contains, greped against the real file — never from the shape of the commonest site. An optional trailing fragment makes variant sites invisible, and the sweep then reports clean over them.
+- P-13: WHEN judging whether a criterion is covered DO count independent methods, not clauses or concurring readers. Checks sharing one method share one blind spot, and a second reader who repeats that method is one measurement counted twice. Give at least one clause a behavioural check.
+- P-14: WHEN a dispatch tells you to re-derive one part of a claim DO also test the existence claim it presupposes, against the tree and the ticket's own later comments. The arithmetic is often right while the premise that anything was ever done is false, and live artifacts inherit it.
+- P-15: WHEN a task touches a generated artifact DO establish which fields the generator derives and which it copies from the existing file. Forbidding hand-edits then forbids the only repair that works, and a diff-clean regeneration check passes over a copied value that is false.
+- P-16: WHEN a task's premise is that regenerating a derived file propagates a value DO read the generator's main() and its refusal branches first: a map reachable only through a bootstrap path that refuses once its output exists regenerates nothing, and the enforced copy is hand-maintained elsewhere.
+- P-17: WHEN a gate fails on a constant that froze an earlier feature's completion snapshot into an invariant DO route a task to correct it, naming the requirement that forced the change. An approved consequence no task owns needs a task; only a criterion unmeetable as written needs the operator.
 ## Gotchas (max 15)
-- G-01: WHEN citing or counting anything in a file another agent may be editing DO pin the figure
-  with `git grep <SHA>` and re-read the anchor at final state. Working-tree numbers mix pre- and
-  post-edit positions, and equal counts across a concurrent edit are not confirmation.
-- G-02: WHEN resolving which lane may write a path DO run the domain guard on the path and read its
-  exit code. Reading the team config gave the wrong lane where the live hook gave the right one,
-  and a dispatch naming a path is not evidence the path is granted.
-- G-03: WHEN collecting command evidence for an automated criterion DO redirect the run to a file
-  and grep it. Piping a multi-script runner to `tail`/`head` truncates the earlier output away and
-  reports the pipe's exit status, not the runner's — the evidence disappears silently.
-- G-04: WHEN re-deriving counts, lists or partitions in a revision pass DO include the items you
-  added earlier in that same pass. Your own additions are the likeliest staleness source, and a
-  self-describing list that under-counts itself still reads as authoritative.
-- G-05: WHEN an amendment widens the scope of an already-executed task DO carry the re-dispatch
-  signal in your DIGEST. A filed receipt proves only what it ran against, and no plan file can
-  re-open a task that already passed.
-- G-06: WHEN confirming a criterion built from several tokens DO enumerate every hit with the full
-  pattern and confirm each sits inside text the change removes. Greping one token of five verifies
-  one fifth of the claim; file-level arithmetic is not evidence.
-- G-07: A sibling feature's worktree under `.claude/worktrees/` is a second full copy of the repo
-  inside the search path. `.gitignore` hides it from `git grep` but not from `grep -r`, so exclude
-  it or a working-tree figure and a pinned one disagree by an order of magnitude.
-- G-08: WHEN a task adds a file to a suite that keeps an explicit registration list DO register it
-  in that same task. A drift detector fails the WHOLE run on an unregistered file, reddening every
-  other task's verify. Exemplar: the SCRIPTS array in this repo's unit-test runner.
-
+- G-01: WHEN citing or counting anything in a file another agent may be editing DO pin the figure with `git grep <SHA>` and re-read the anchor at final state. Working-tree numbers mix pre- and post-edit positions, and equal counts across a concurrent edit are not confirmation.
+- G-02: WHEN resolving which lane may write a path DO run the domain guard on EVERY path the plan names, never a sample, and read its exit code. The team config gave the wrong lane where the live hook gave the right one, and a sample says nothing about the rest.
+- G-03: WHEN collecting command evidence for an automated criterion DO capture output by command substitution and grep the variable. Piping to `tail`/`head` truncates earlier output and reports the pipe's exit status, not the runner's; a redirect captures whole but is a write, refusable where the path is not granted.
+- G-04: WHEN a verify slices a region anchored on a label's FIRST occurrence DO bound the region on both sides, or assert the label occurs once. A stray earlier mention relocates the region onto unrelated code that already satisfies the count, and the clause greens on work never done.
+- G-05: WHEN an artifact a human executes pins a commit or a line count DO re-derive both whenever the pin moves. Every sentence stays true-looking while exactly the numbers the operator uses to confirm they are reading the right text rot, and the check then grades the wrong text.
+- G-06: WHEN your count contradicts a recorded one DO reproduce the recorded invocation before calling it drift. Two totals under one label are often two different measurements, and the invocation the plan or criterion mandates is the one that defines the quantity being graded.
+- G-07: WHEN citing gate or panel evidence produced before the commit you are grading DO diff the range for source changes and re-run the suites at that commit. An earlier green proves the earlier tree, and the provenance rots silently because the verdict text stays true-looking.
+- G-08: WHEN citing a suite's exit code or ok-line count as proof it passed DO read the runner's failure accounting first. One counting a failure only when a detail string is non-empty exits 0 while printing FAIL lines, which no ok-count sees. Grep the failure prefix.
+- G-09: WHEN routing a fix cycle DO name which met verdicts the remedy commit itself will falsify. A criterion quantifying over the whole change set goes stale underneath a later commit, the grade was correct when taken, and nothing can unland the commit that broke it.
+- G-10: WHEN a check compares a field looked up by a name discovered at runtime DO add an explicit key-absent branch reporting CANNOT VERIFY. A wrong key makes both sides None, the comparison reports clean for every record, and its silence reads as proof.
+- G-11: WHEN a verify asserts that a case must currently FAIL DO rewrite it to exclude the case instead. A by-construction red is turned green by any later task in the sequence, so the block is unsatisfiable in one window while the work it grades is correct.
+- G-12: A plain YAML scalar containing a space then a hash starts a comment: `safe_load` truncates the value there, so an inline issue reference silently deletes the rest of the sentence. Write prose scalars folded or quoted, then reload the file and confirm each value's tail survives.
+- G-13: WHEN you narrow, correct or supersede a claim DO fix every occurrence of it in the same edit — grep the whole artifact, and rewrite the artifact itself whenever your handoff summary supersedes it. The summary reaches one tier; the file is what the next context opens.
+- G-14: WHEN a verify asserts absence by counting DO NOT wrap the search in `test "$(cmd | wc -l)" = 0`: a search that errors prints nothing, the count is zero and the test passes. Assert the search's exit status, or pair it with a positive control that must match.
+- G-15: WHEN you author a verify, or grade a criterion, over a file the task produces DO read it at the ref under review, never the working tree. A tree-reading check passes for any deliverable that was never committed, and untracked output leaves no evidence at the ref at all.
 ## Outcomes (max 10)
-
+- O-01: WHEN proving a test reddens if either side changes alone DO mutate one branch at a time, never one per side. Separate branches behind the same rendering redden different assertion sets, so a per-side proof reports the side covered while a whole branch stays unprobed.
+- O-02: WHEN designing a mutation DO first read which side consumes which function, then aim it at the fixture the case itself builds. A mutant that reddens other cases but not the one under test missed its target, and that reads as coverage.
+- O-03: WHEN proving a multi-grep verify block against a mutated file DO give every grep its own process substitution. One shared `<(...)` is a one-shot stream: the first grep drains it, so later absence checks pass and presence checks fail, inverting the whole ladder.
+- O-04: WHEN proving a NEW conjunct of an and-chained verify can turn green DO build a temp tree where every earlier conjunct passes, then mutate only the new one. On the pre-change tree an earlier conjunct exits first, so the new one never runs and its green is assumed, never observed.
+- O-06: WHEN a probe or mutation harness reports a uniform verdict across cases DO assert it ran the real artifact and reached the branch under test. A mis-invoked harness, or a call with the wrong argument shape, returns one early guard's answer for every case and reads as clean.
+- O-07: WHEN a criterion claims a check fails against the pre-change code DO run the current suite against the earlier commit's copy of the changed file. Where the change is one script, a prior commit is a free mutant and proves the clause independently of the gate that asserted it.
+- O-08: WHEN a criterion demands that a mutant redden DO first check whether the test harness already honours a binary-override environment variable. A seam pointing the suite at a temp copy turns an unprovable claim into a two-command proof, with no edit to the shipped script.
+- O-11: WHEN authoring a proof that a gate can fail DO reuse the red idiom the target's own tests already use, never a relative commit ref: the predecessor task lands as its own commit, so the ref drifts and the case reads the post-change file.
+- O-12: WHEN proving a verify block verbatim without touching the file under test DO build a temp root whose data directories are symlinks and whose script is a real COPY: python resolves a symlinked script for sys.path[0], so sibling imports vanish and the run dies in a dependency-missing branch.
+- O-13: WHEN proving a verify discriminates by requiring non-zero on the unbuilt tree DO read the message, not just the status: a script invoked without its required argument exits 2, and a diff over a file the task itself edits is red while uncommitted. Both mimic discrimination.
 ## Open (max 5)

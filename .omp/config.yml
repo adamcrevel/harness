@@ -1,0 +1,14 @@
+# Harness must run from OMP-native and provider-neutral sources.
+disabledProviders:
+  - claude
+
+# Harness requires an explicit provider overlay from `.omp/providers/`.
+# Concrete models never live in canonical agent definitions.
+# Child work is supervised by the OMP process and has no wall-clock deadline. The
+# request budget remains OMP's runaway-turn safety bound.
+async:
+  enabled: true
+
+task:
+  maxRecursionDepth: 3
+  maxRuntimeMs: 0

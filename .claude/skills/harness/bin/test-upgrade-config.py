@@ -18,6 +18,18 @@ is shaped to close both.
 So: EVERY case here runs the script as a SUBPROCESS, exactly as a user or the
 init flow does. No importlib, no injection, no sys.path help. If the script
 cannot run on its own, these fail.
+
+T-05 (FEAT-31): does a NEW `budgets` key added to the template propagate into an
+existing project's harness.json? BRANCH FOUND TRUE, by reading upgrade-config.py:
+GENERIC MERGE ALREADY PROPAGATES IT — `budgets` receives no special handling
+anywhere in the file. `merge()` (upgrade-config.py:64-89) recurses into any
+key that is a dict on both sides (:86-87, `isinstance(tv, dict) and
+isinstance(out[k], dict)`), and inside that recursion a key absent from the
+project's dict is added at the template's value (:79-83, `if k not in out: ...
+out[k] = tv`). `budgets` in a real project config is exactly such a dict, so a
+new leaf key under it is added by the same path that already adds a new
+top-level key. upgrade-config.py was changed NOT AT ALL for this task; only the
+proving case below (case 8) was added.
 """
 import json
 import os
@@ -49,11 +61,11 @@ teams:
 def project(harness_json='{"schema_version": 1}', manifest="schema_version: 1\n"):
     """A fixture that REACHES the manifest comparison.
 
-    It must carry a templates dir. Without one the script exits early with
-    "no templates … run /harness-deploy first" and never calls yaml_version or
-    yaml_names at all — which is how the first draft of this file passed 6/6
-    against the KNOWN-BROKEN script. A test that never reaches the defect is not
-    a test; it is the same non-discriminating shape that let F-03 ship.
+    It must carry a templates dir. Without one the script exits early citing an
+    incomplete checkout and never calls yaml_version or yaml_names at all — which
+    is how the first draft of this file passed 6/6 against the KNOWN-BROKEN
+    script. A test that never reaches the defect is not a test; it is the same
+    non-discriminating shape that let F-03 ship.
     """
     d = tempfile.mkdtemp()
     os.makedirs(os.path.join(d, ".harness"))
@@ -160,6 +172,32 @@ r = run(project(manifest=TRUTHY), "--check")
 check("Q2: a YAML-truthy name (`- name: no`) does not vanish from the roster",
       ran_clean(r), f"exit {r.returncode}: {r.stderr.strip()[-300:]}")
 
+# --- 6. the missing-templates message names a checkout gap, not a retired command ---
+# There is no distribution slash command any more: templates ship inside this repository.
+# The message must say so, not send the user to run a command that no longer exists.
+# RETIRED_CMD is built by concatenation, not written literally, so this file itself does
+# not trip the whole-tree grep for the retired command's name.
+RETIRED_CMD = "/" + "harness" + "-" + "deploy"
+no_templates = project()
+r = subprocess.run(
+    [sys.executable, SCRIPT, no_templates, "--check",
+     "--templates", os.path.join(no_templates, "_does_not_exist")],
+    capture_output=True, text=True)
+out = r.stdout + r.stderr
+check("missing-templates message points at an incomplete checkout, not the retired command",
+      RETIRED_CMD not in out and "checkout is incomplete" in out,
+      f"exit {r.returncode}: {out.strip()[-300:]}")
+
+# --- 7. the unparsable-shipped-template message names a checkout gap, not a retired command ---
+broken_template = project()
+with open(os.path.join(broken_template, "_templates", "team-config.yaml"), "w") as f:
+    f.write("teams: [ {name: x ## eaten\nnext: 1\n")
+r = run(broken_template, "--check")
+out = r.stdout + r.stderr
+check("unparsable shipped template message points at a complete checkout, not the retired command",
+      ran_clean(r) and RETIRED_CMD not in out and "complete checkout of this repository" in out,
+      f"exit {r.returncode}: {out.strip()[-300:]}")
+
 # --- 5. --check writes nothing ---
 p = project()
 before = open(os.path.join(p, ".harness", "team-config.yaml")).read()
@@ -169,6 +207,58 @@ _r = run(p, "--check")
 check("--check never rewrites team-config.yaml (safe_dump would strip its comments)",
       ran_clean(_r) and before == after, "the manifest changed under --check")
 
+
+# --- 8. a NEW budgets key propagates through the SAME generic nested-dict merge as
+# any other nested object (test_kinds, etc.) — see the module docstring for the read
+# (upgrade-config.py:79-83, :86-88) that establishes this without any production
+# change. Assert the VALUE, not mere presence.
+budgets_root = project(harness_json=json.dumps({"schema_version": 1, "budgets": {}}))
+with open(os.path.join(budgets_root, "_templates", "harness.json"), "w") as f:
+    json.dump({"schema_version": 2,
+               "budgets": {"orchestrator_context_warn_tokens": 200000}}, f)
+r = run(budgets_root)
+merged_budgets = json.load(open(os.path.join(budgets_root, ".harness", "harness.json")))
+check("a new budgets key (orchestrator_context_warn_tokens) propagates from the "
+      "template at the template's value, 200000",
+      ran_clean(r)
+      and merged_budgets.get("budgets", {}).get("orchestrator_context_warn_tokens") == 200000,
+      f"exit {r.returncode}; budgets={merged_budgets.get('budgets')}; "
+      f"stderr={r.stderr.strip()[-300:]}")
+
+
+# --- 9. BUG-1071 F2: `panel_era_start` reaches an already-onboarded project THROUGH THIS
+# SCRIPT. The cycle-1 panel named this exact gap against itself — "no test drives
+# panel_era_start through upgrade-config.py's real merge; that gap is exactly what let the
+# C1-F1 migration defect ship" — because the claim that adding the template key IS the
+# migration was, until now, verified only by hand against a synthetic fixture.
+#
+# BOTH DIRECTIONS, because the whole contract is "template fills gaps, project values win"
+# and only one of those halves is about the key arriving. A project that has ALREADY set
+# its own boundary must not have it reset to the template's null on a later upgrade: that
+# would silently re-grade every pre-panel plan it had correctly exempted, which is the
+# migration failure this case exists to keep closed.
+era_gap = project(harness_json=json.dumps({"schema_version": 1}))
+with open(os.path.join(era_gap, "_templates", "harness.json"), "w") as f:
+    json.dump({"schema_version": 2, "panel_era_start": None}, f)
+r = run(era_gap)
+merged_era = json.load(open(os.path.join(era_gap, ".harness", "harness.json")))
+check("panel_era_start ARRIVES in a schema-1 project through the real merge, at the "
+      "template's null",
+      ran_clean(r)
+      and "panel_era_start" in merged_era
+      and merged_era["panel_era_start"] is None,
+      f"exit {r.returncode}; merged={merged_era}; stderr={r.stderr.strip()[-300:]}")
+
+era_set = project(harness_json=json.dumps({"schema_version": 1,
+                                           "panel_era_start": "2026-08-31"}))
+with open(os.path.join(era_set, "_templates", "harness.json"), "w") as f:
+    json.dump({"schema_version": 2, "panel_era_start": None}, f)
+r = run(era_set)
+kept_era = json.load(open(os.path.join(era_set, ".harness", "harness.json")))
+check("a project's OWN panel_era_start survives the upgrade and is not reset to the "
+      "template's null",
+      ran_clean(r) and kept_era.get("panel_era_start") == "2026-08-31",
+      f"exit {r.returncode}; merged={kept_era}; stderr={r.stderr.strip()[-300:]}")
 
 def main():
     fails = 0

@@ -4,6 +4,12 @@
 WHY THIS EXISTS: on 2026-08-03 all four gates were green while FOUR files in this
 repo's own `.harness/` tree could not be parsed at all —
 
+HISTORICAL RECORD, NOT CURRENT PATHS: the three paths below name each file as it
+was named on 2026-08-03. FEAT-14 later closed the key set and converted that
+format to JSON. The citations are deliberately left unrenamed - renaming them
+would assert those files existed under a name they never had, and this docstring
+is the evidence for why the gate exists.
+
   .harness/team-config.yaml:18   ` ##` opens a comment even inside a `[...]` flow
                                  sequence, so the `[` never closed and the document
                                  DIED AT LINE 23. Every key from `orchestrator:`
@@ -28,6 +34,7 @@ detector stops detecting. That is deliberate: it is the one property a validity 
 cannot self-report.
 """
 import glob
+import re
 import os
 import sys
 import tempfile
@@ -45,16 +52,16 @@ except ModuleNotFoundError:
     print("test-harness-yaml-corpus: PyYAML is not importable from this interpreter "
           f"({sys.executable}).\n"
           "  install:  python3 -m pip install --user --break-system-packages pyyaml\n"
-          "  This is REQUIRED, not optional (DEC-171 am.1) — there is no line-scan "
+          "  This is REQUIRED, not optional (DEC-171) — there is no line-scan "
           "fallback by design.", file=sys.stderr)
     sys.exit(1)
 
-REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+REPO = (os.environ.get("HARNESS_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR")) or os.getcwd()
 
 
 def _rel(p, root):
     """Report from the REPO root where possible, so a failure names which tree it
-    came from — `.claude/skills/harness/teams/build.yaml`, not a bare `build.yaml`.
+    came from — `.agents/skills/harness/teams/build.yaml`, not a bare `build.yaml`.
     Falls back to `root` for the throwaway fixture roots, which live outside REPO."""
     ap = os.path.abspath(p)
     try:
@@ -63,6 +70,43 @@ def _rel(p, root):
     except ValueError:      # different drive / no common path
         pass
     return os.path.relpath(p, root)
+
+
+NOTES_DIR_RE = re.compile(r"(?:^|/)features/[^/]+/notes(?:/|$)")
+
+
+def _is_feature_notes(dirpath):
+    """True for a feature's `notes/` directory, or anything under it.
+
+    WHY THIS EXEMPTION EXISTS, measured 2026-08-21. FEAT-31's planning was hit by issue
+    #628 — two `harness-pm` spawns wrote `plan.yaml` 63 seconds apart and a 14-task plan
+    became a 1-task plan. The lost draft was recovered from transcripts and committed as
+    EVIDENCE, named `notes/recovered-draft-14task-does-not-parse.yaml` because the recovery
+    was imperfect and the file genuinely does not parse: line 85 carries prose with a
+    colon-space inside a task's `intent`, which YAML reads as a mapping key — the exact
+    failure mode this test exists to catch.
+
+    So a file committed BECAUSE it is unparseable was read by the test asserting everything
+    parses. The unit suite went red, and four of that feature's own tasks required it green
+    — their `verify:` blocks were unsatisfiable from the moment the plan was signed.
+
+    THE RULE, and it is about what a directory is FOR. `notes/` holds evidence, research and
+    recovered artifacts: the place you put the broken thing you are documenting. Every other
+    YAML in the tree is a live document that something reads — `plan.yaml`, `feature.json`'s
+    siblings, `team-config.yaml`, the shipped team definitions — and those stay covered.
+    Exempting `notes/` closes the CLASS: no future recovery of a malformed artifact can
+    break the suite for the feature that recovered it.
+
+    WHAT THIS GIVES UP, stated rather than discovered: a genuinely malformed YAML that
+    matters, parked in a feature's `notes/`, is no longer caught here. Accepted, because
+    nothing reads a file in `notes/` as a document — if something ever does, that consumer
+    brings its own parse and its own error.
+
+    Matched on the PATH SHAPE `features/<id>/notes/`, not on the bare name `notes`, so an
+    unrelated `notes/` elsewhere in the tree stays covered.
+    """
+    norm = dirpath.replace(os.sep, "/")
+    return NOTES_DIR_RE.search(norm) is not None
 
 
 def scan(root):
@@ -82,6 +126,8 @@ def scan(root):
     corpus-is-not-empty assertion below exists to catch."""
     paths = []
     for dirpath, _dirnames, filenames in os.walk(root):
+        if _is_feature_notes(dirpath):
+            continue
         for fn in filenames:
             if fn.endswith((".yaml", ".yml")):
                 paths.append(os.path.join(dirpath, fn))
@@ -111,16 +157,21 @@ def scan(root):
 TEAMS_ROOT = os.path.join(".claude", "skills", "harness", "teams")
 ROOTS = [".harness", TEAMS_ROOT]
 
-# SC-05's second conjunct. The criterion reads "the directory's contents at completion
-# are exactly TWO files — review.yaml (receiving the quoting fix) and build.yaml (born
-# valid); gate-probe.yaml is deleted, so the count is two, not three" — and declares
-# `verify: automated  evidence: unit`. Without this line only the PARSE half had an
-# assertion: the `2` appeared in an f-string LABEL, which reports a number without
-# asserting it. A criterion whose cited test does not cover what it claims is this
-# repo's own charter defect, so the count is asserted rather than displayed.
-# If a third team is legitimately added, this failing is the intended prompt to revisit
-# SC-05 rather than to silently widen the number.
-TEAMS_EXPECTED = 2
+# The team-definitions tree is expected to hold exactly three files: build.yaml,
+# plan-panel.yaml, review.yaml. plan-panel.yaml was legitimately added by FEAT-45's
+# T-02 under the operator's signature of 2026-08-30 (covering REQ-01..REQ-14); it is
+# not drift. The ruling that a third team belongs here is D-15 in
+# .harness/harness/features/FEAT-45-adversarial-plan-panel/plan.yaml — read it before
+# touching this number.
+#
+# FEAT-06's SC-05 ("the directory's contents at completion are exactly two files") is
+# a completion snapshot, already met and permanently met; it was never changed or
+# revisited. What was corrected is THIS constant, which had generalised that snapshot
+# into a standing invariant it was never meant to be. The count stays ASSERTED, not
+# merely reported in a label: widening this number SILENTLY, without a recorded ruling
+# naming the requirement that forces the new file, is still forbidden. A further team
+# is again a prompt to think, not to silently widen.
+TEAMS_EXPECTED = 3
 
 
 def scan_roots(roots):
@@ -149,7 +200,7 @@ def _fixture(body):
 def _fixture_teams(body):
     """A throwaway repo root containing a shipped-team-definition tree (SC-06).
 
-    Deliberately NOT written into the real `.claude/skills/harness/teams/` — a gate
+    Deliberately NOT written into the real `.agents/skills/harness/teams/` — a gate
     proved by mutating the tree it guards is a gate that has been switched off for
     the duration of its own test."""
     d = tempfile.mkdtemp()
@@ -179,7 +230,7 @@ def check(name, ok, detail=""):
 
 
 # --- 1. the real corpus, across BOTH shipped trees ---------------------------
-# `.claude/skills/harness/teams` is here because it was outside this gate's reach
+# `.agents/skills/harness/teams` is here because it was outside this gate's reach
 # while both files in it failed to parse — the gate's own blind spot, not a new tree.
 bad, counts = scan_roots(ROOTS)
 total = sum(counts.values())
@@ -192,7 +243,7 @@ for r, n in counts.items():
     check(f"the corpus under {r} is not empty (a scan that matches nothing passes vacuously)",
           n > 0, f"scanned {n} files under {os.path.join(REPO, r)}")
 # SC-05's count conjunct — ASSERTED, not merely reported in a label above.
-check(f"{TEAMS_ROOT} holds exactly {TEAMS_EXPECTED} team definitions (SC-05)",
+check(f"{TEAMS_ROOT} holds exactly {TEAMS_EXPECTED} team definitions (FEAT-06 SC-05)",
       counts.get(TEAMS_ROOT) == TEAMS_EXPECTED,
       f"found {counts.get(TEAMS_ROOT)}: "
       f"{sorted(os.listdir(os.path.join(REPO, TEAMS_ROOT))) if os.path.isdir(os.path.join(REPO, TEAMS_ROOT)) else 'directory missing'}")
@@ -222,6 +273,43 @@ for name, body in NEGATIVE:
     _, nb = scan(d)
     check(name, len(nb) == 1, f"expected exactly 1 finding, got {len(nb)}: {nb}")
 
+# --- 5b. a feature's notes/ is exempt, and the SAME file outside it is not ---
+# THE PAIR IS THE POINT. A case asserting only that notes/ is skipped would also pass if
+# scan() stopped finding anything at all -- a gate switched off looks identical to a gate
+# with a correct exemption. So the identical malformed body is written to TWO places and the
+# assertions run in opposite directions.
+_BAD = "steps:\n  - id: s1\n    intent: what it does NOT catch, stated: (a) presence\n"
+
+_d = tempfile.mkdtemp()
+_notes = os.path.join(_d, ".harness", "harness", "features", "FEAT-XX", "notes")
+os.makedirs(_notes)
+with open(os.path.join(_notes, "recovered-draft.yaml"), "w", encoding="utf-8") as _fh:
+    _fh.write(_BAD)
+_, _nb = scan(_d)
+check("a malformed YAML in a feature's notes/ is EXEMPT (issue #628's recovered draft)",
+      not _nb, _nb)
+
+_d2 = tempfile.mkdtemp()
+_live = os.path.join(_d2, ".harness", "harness", "features", "FEAT-XX")
+os.makedirs(_live)
+with open(os.path.join(_live, "plan.yaml"), "w", encoding="utf-8") as _fh:
+    _fh.write(_BAD)
+_, _nb2 = scan(_d2)
+check("the IDENTICAL body one directory up, as plan.yaml, is still flagged -- so the "
+      "exemption is scoped and the scan is not simply dead",
+      len(_nb2) == 1, f"expected exactly 1 finding, got {len(_nb2)}: {_nb2}")
+
+# And the exemption must be keyed on the PATH SHAPE, not the bare directory name: an
+# unrelated notes/ that is not under features/<id>/ stays covered.
+_d3 = tempfile.mkdtemp()
+_other = os.path.join(_d3, ".harness", "notes")
+os.makedirs(_other)
+with open(os.path.join(_other, "thing.yaml"), "w", encoding="utf-8") as _fh:
+    _fh.write(_BAD)
+_, _nb3 = scan(_d3)
+check("a notes/ NOT under features/<id>/ is still covered", len(_nb3) == 1,
+      f"expected exactly 1 finding, got {len(_nb3)}: {_nb3}")
+
 # --- 6. and must NOT cry wolf ------------------------------------------------
 d = _fixture('writes: [".harness/features/*/BRIEF.md ## Approval", "x/**"]\n'
              'pending:\n  - >-\n    prose with a colon: and a `backtick`, safely folded\n')
@@ -234,7 +322,7 @@ check("a correctly quoted/folded file is NOT flagged", not nb, nb)
 # reported green, because it could not see the directory at all.
 d = _fixture_teams("outputs: [a/{{x}}/b]\nnext_key: 1\n")
 _, nb = scan(d)
-check("detects a broken team definition under .claude/skills/harness/teams (SC-06)",
+check("detects a broken team definition under .agents/skills/harness/teams (SC-06)",
       len(nb) == 1, f"expected exactly 1 finding, got {len(nb)}: {nb}")
 
 # --- 7. the message has to be actionable ------------------------------------

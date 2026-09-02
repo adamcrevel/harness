@@ -4,8 +4,8 @@ per FEAT-04-decisions-index T-01 — this is the RED deliverable.
 
 Six tests. Four of them exercise the generator directly and fail-by-design at
 T-01 because `gen-decisions-index.py` does not exist yet. Test 4 exercises the
-already-shipped `check-docs.sh` and is expected to be green today. Test 5
-exercises the committed `docs/harness/DECISIONS-INDEX.md`, which does not
+already-shipped generator and is expected to be green today. Test 5
+exercises the committed `.harness/harness/docs/DECISIONS-INDEX.md`, which does not
 exist yet either, and SKIPs by design (file-absence only — see its docstring).
 
 Each test is wrapped in its own try/except in main() so one test's exception
@@ -20,9 +20,9 @@ import tempfile
 
 BIN_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(BIN_DIR, "..", "..", "..", ".."))
-REAL_DECISIONS = os.path.join(REPO_ROOT, "docs", "harness", "DECISIONS.md")
-REAL_INDEX = os.path.join(REPO_ROOT, "docs", "harness", "DECISIONS-INDEX.md")
-CHECK_DOCS = os.path.join(BIN_DIR, "check-docs.sh")
+DOCS_DIR = os.path.join(".harness", "harness", "docs")  # mirrors the generator's own constant
+REAL_DECISIONS = os.path.join(REPO_ROOT, DOCS_DIR, "DECISIONS.md")
+REAL_INDEX = os.path.join(REPO_ROOT, DOCS_DIR, "DECISIONS-INDEX.md")
 
 # Overridable so a fix can be proven RED against a reverted copy — the same
 # CHECK_STATE_BIN escape test-check-state.py uses.
@@ -44,7 +44,7 @@ ROW_RE = gdi.ROW_RE
 
 
 def fence_guarded_dec_headings(text):
-    """Mirror check-docs.sh's fence toggle (:44-48) exactly: a '## DEC-N'
+    """Mirror the fence toggle exactly: a '## DEC-N'
     heading seen while inside a ``` code fence is documentation of the format,
     not a live declaration, and must not be harvested."""
     owners = []
@@ -61,22 +61,17 @@ def fence_guarded_dec_headings(text):
     return owners
 
 
-def strip_ruling_prose(s):
-    """Drop all trailing '— SUPERSEDED BY DEC-N' clauses (repeatable — DEC-19
-    carries two) and any trailing <!-- ok-stale --> marker, then return what's
-    left. Used to measure hand-written prose, not generator-written clauses."""
-    cur = s.strip()
-    prev = None
-    while prev != cur:
-        prev = cur
-        cur = re.sub(r"—\s*SUPERSEDED BY DEC-\d+\s*$", "", cur).strip()
-        cur = re.sub(r"<!--\s*ok-stale\s*-->\s*$", "", cur).strip()
-    return cur
-
-
 def run_gen(tree, extra_env=None, args=None):
+    # The generator resolves its root via harness_boundary.resolve_root, which reads
+    # HARNESS_PROJECT_DIR only and requires the override to carry team-config.yaml
+    # (MARKER) — CLAUDE_PROJECT_DIR no longer redirects it at all (FEAT-42 T-05).
+    os.makedirs(os.path.join(tree, ".harness"), exist_ok=True)
+    marker = os.path.join(tree, ".harness", "team-config.yaml")
+    if not os.path.exists(marker):
+        open(marker, "w", encoding="utf-8").write("")
     env = dict(os.environ)
-    env["CLAUDE_PROJECT_DIR"] = tree
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    env["HARNESS_PROJECT_DIR"] = tree
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -86,13 +81,13 @@ def run_gen(tree, extra_env=None, args=None):
 
 
 def make_authority(tmp, decisions, bodies=None):
-    """decisions: list of (number:int, title:str). Writes docs/harness/DECISIONS.md.
+    """decisions: list of (number:int, title:str). Writes .harness/harness/docs/DECISIONS.md.
 
     bodies: optional {number: body_text} to override a decision's placeholder body,
     for the cases where the BODY is what is under test (supersession prose, B-3).
     """
     bodies = bodies or {}
-    docs_dir = os.path.join(tmp, "docs", "harness")
+    docs_dir = os.path.join(tmp, DOCS_DIR)
     os.makedirs(docs_dir, exist_ok=True)
     body = []
     for n, title in decisions:
@@ -128,21 +123,30 @@ def test_row_per_distinct_dec_matches_authority():
         fenced = fence_guarded_dec_headings(text)
         distinct = sorted(set(fenced))
 
-        # Documented divergence (D-04): ## DEC-83 appears a second time inside a
-        # code fence at DECISIONS.md:1583. The raw regex harvests it; the
-        # fence-guarded parse the generator must use does not.
-        # Assert the RELATIONSHIP, never frozen totals (issue #5): a literal count
-        # reddens this gate on the next appended decision, which punishes writing a
-        # decision rather than catching a parser defect. What D-04 actually claims is
-        # that the raw regex over-harvests by exactly the fenced duplicates.
-        fenced_dupes = len(raw) - len(distinct)
-        if fenced_dupes != 1:
-            print(f"FAIL - {name}: raw regex should over-harvest fence-guarded by exactly 1 "
-                  f"(the DEC-83 duplicate inside a code fence), got {fenced_dupes} "
-                  f"(raw={len(raw)}, distinct={len(distinct)})")
+        # ASSERT THE RELATIONSHIP, NEVER A FROZEN TOTAL (issue #5). Zero fenced
+        # duplicates is a legitimate state of the live document, so this checks a
+        # relationship (harvested ids never exceed the raw count, and never repeat)
+        # rather than pinning the duplicate count to any one figure.
+        #
+        # So the live file now carries only the invariants that must always hold,
+        # and the fence guard is proven against a SYNTHETIC fixture below — which is
+        # stronger, because it fails when the guard breaks rather than when someone
+        # edits an unrelated decision.
+        if len(raw) < len(distinct):
+            print(f"FAIL - {name}: fence-guarded parse harvested MORE ids than the raw "
+                  f"regex ({len(distinct)} > {len(raw)}) — the guard is adding ids")
             return False
         if len(distinct) != len(set(distinct)):
             print(f"FAIL - {name}: fence-guarded parse yielded duplicate ids")
+            return False
+
+        # The guard itself: a heading inside a fence must NOT be harvested.
+        planted = text + "\n\n```\n## DEC-9999 — fenced, must not be harvested\n```\n"
+        if "DEC-9999" in fence_guarded_dec_headings(planted):
+            print(f"FAIL - {name}: fence guard harvested a heading inside a code fence")
+            return False
+        if "DEC-9999" not in re.findall(r"^## (DEC-\d+)", planted, re.M):
+            print(f"FAIL - {name}: the planted fixture is wrong — the raw regex should see it")
             return False
 
         if not os.path.exists(GEN):
@@ -150,7 +154,7 @@ def test_row_per_distinct_dec_matches_authority():
             return False
 
         with tempfile.TemporaryDirectory() as tmp:
-            docs_dir = os.path.join(tmp, "docs", "harness")
+            docs_dir = os.path.join(tmp, DOCS_DIR)
             os.makedirs(docs_dir, exist_ok=True)
             shutil.copy(REAL_DECISIONS, os.path.join(docs_dir, "DECISIONS.md"))
             index_path = os.path.join(docs_dir, "DECISIONS-INDEX.md")
@@ -239,8 +243,16 @@ def test_preserves_hand_written_rulings_by_dec_number():
         return False
 
 
-def test_preserves_inline_ok_stale_marker_on_a_row():
-    name = "test_preserves_inline_ok_stale_marker_on_a_row"
+def test_strips_inline_ok_stale_marker_on_a_row():
+    """The marker is STRIPPED, never preserved — the revival vector, closed.
+
+    This test used to assert the opposite: that a hand-written row carrying
+    `<!-- ok-stale -->` survived regeneration byte-identical. That was correct while
+    the propagation checker existed. DEC-188 struck the checker whole, and a live
+    plant then proved the emitter was a revival vector — the marker propagated
+    through regeneration while check-state.sh and the whole unit suite stayed green.
+    Now the hand-written RULING must survive and the dead marker must not."""
+    name = "test_strips_inline_ok_stale_marker_on_a_row"
     try:
         if not os.path.exists(GEN):
             print(f"FAIL - {name}: generator not found at {GEN}")
@@ -301,8 +313,13 @@ def test_preserves_inline_ok_stale_marker_on_a_row():
             if not dec3_rows:
                 print(f"FAIL - {name}: DEC-3 row missing after regeneration")
                 return False
-            if dec3_rows[0] != marked_row:
-                print(f"FAIL - {name}: DEC-3 row not byte-identical (ok-stale marker or text altered)")
+            if "ok-stale" in dec3_rows[0]:
+                print(f"FAIL - {name}: the ok-stale marker survived regeneration — "
+                      f"the revival vector DEC-188 closed is open again: {dec3_rows[0]!r}")
+                return False
+            if dec3_rows[0] != marked_row.replace(" <!-- ok-stale -->", "").replace("<!-- ok-stale -->", "").rstrip():
+                print(f"FAIL - {name}: the hand-written ruling did not survive the strip "
+                      f"unchanged: {dec3_rows[0]!r}")
                 return False
 
         print(f"ok - {name}")
@@ -312,92 +329,54 @@ def test_preserves_inline_ok_stale_marker_on_a_row():
         return False
 
 
-def test_checker_scans_root_level_markdown():
-    """check-docs.sh must see CLAUDE.md — the file read at EVERY session start (issue #139).
+def test_committed_index_matches_a_fresh_regeneration():
+    """The committed index must BE what the generator produces. Nothing checked this.
 
-    Its scan roots were docs/harness, .harness, .claude/skills, .claude/commands and
-    .claude/agents. The REPO ROOT was not among them, so the propagation checker was blind
-    to the file with the widest blast radius in the tree. Verified before the fix by
-    planting a live stale phrase in the real CLAUDE.md: zero hits.
+    Found by mutant testing during the #202 review. Two mutants against the committed
+    file: a DELETED row and a SPURIOUS row for a decision with no heading. The whole
+    suite stayed green for both, because every other test regenerates into a tmp dir
+    and compares counts — none of them reads REAL_INDEX and diffs it.
 
-    The second half of this case is as load-bearing as the first: the root tier must be
-    NON-RECURSIVE. Globbing `**` from `.` would walk .git, node_modules and
-    .claude/worktrees/, scanning every file of every other checkout as if it were this one.
+    Only half the gap was real. The generator ALREADY exits 1 on the spurious row
+    (`ORPHAN: … has a ruling in the index but no live heading`), measured. The deleted
+    row is the silent one, and it self-heals on the next regeneration — so the window
+    is narrow, and this test closes it rather than guarding a disaster.
+
+    THE COST, STATED SO NOBODY IS SURPRISED BY IT: this goes red when someone edits
+    DECISIONS.md and has not yet run the generator. That is the "punishes writing a
+    decision rather than catching a defect" trap this file warns about elsewhere, and
+    it is accepted here because the remedy is one command the failure message names.
     """
-    name = "test_checker_scans_root_level_markdown"
+    name = "test_committed_index_matches_a_fresh_regeneration"
     try:
-        phrase = "another fabricated placeholder phrase"
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_dir = os.path.join(tmp, "docs", "harness")
-            os.makedirs(docs_dir, exist_ok=True)
-            with open(os.path.join(docs_dir, "DECISIONS.md"), "w", encoding="utf-8") as f:
-                f.write("## DEC-01 — Single test decision\n\n"
-                        f'<!-- stale: "{phrase}" -->\n\n**Chose:** placeholder body.\n')
-            with open(os.path.join(tmp, "CLAUDE.md"), "w", encoding="utf-8") as f:
-                f.write(f"# Project\n\nThis file repeats the {phrase} on purpose.\n")
-            # A decoy one level down that the root tier must NOT reach, or the tier is
-            # recursive and the case above would pass for the wrong reason.
-            deep = os.path.join(tmp, "vendor", "someones-node-modules")
-            os.makedirs(deep, exist_ok=True)
-            with open(os.path.join(deep, "README.md"), "w", encoding="utf-8") as f:
-                f.write(f"Vendored text mentioning the {phrase}.\n")
+        if not os.path.exists(GEN):
+            print(f"FAIL - {name}: generator not found at {GEN}")
+            return False
+        if not os.path.isfile(REAL_INDEX):
+            print(f"FAIL - {name}: {REAL_INDEX} not found")
+            return False
 
-            env = dict(os.environ)
-            env["CLAUDE_PROJECT_DIR"] = tmp
-            r = subprocess.run([CHECK_DOCS], cwd=tmp, capture_output=True, text=True, env=env)
-            out = r.stdout + r.stderr
-            assert "CLAUDE.md" in out, f"root CLAUDE.md was not scanned:\n{out}"
-            assert r.returncode == 1, f"expected exit 1, got {r.returncode}:\n{out}"
-            assert "someones-node-modules" not in out, (
-                f"the root tier recursed into a subdirectory — it must be depth-0 only:\n{out}")
-        print(f"ok   {name}")
-        return True
-    except AssertionError as e:
-        print(f"FAIL {name}: {e}")
-        return False
+        r = subprocess.run([sys.executable, GEN, "--stdout"],
+                           cwd=REPO_ROOT, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"FAIL - {name}: generator exited {r.returncode} — the committed index "
+                  f"cannot be reproduced: {r.stderr.strip()[:300]}")
+            return False
 
-
-def test_checker_flags_planted_stale_phrase_in_index():
-    name = "test_checker_flags_planted_stale_phrase_in_index"
-    try:
-        phrase = "fabricated placeholder phrase"
-        with tempfile.TemporaryDirectory() as tmp:
-            docs_dir = os.path.join(tmp, "docs", "harness")
-            os.makedirs(docs_dir, exist_ok=True)
-            with open(os.path.join(docs_dir, "DECISIONS.md"), "w", encoding="utf-8") as f:
-                f.write(
-                    "## DEC-01 — Single test decision\n\n"
-                    f'<!-- stale: "{phrase}" -->\n\n'
-                    "**Chose:** placeholder body text.\n"
-                )
-            index_row = f"- DEC-01 @1 [] refs:  :: This ruling repeats the {phrase} on purpose."
-            with open(os.path.join(docs_dir, "DECISIONS-INDEX.md"), "w", encoding="utf-8") as f:
-                f.write("<!-- index-contract v1 -->\n\n" + index_row + "\n")
-
-            env = dict(os.environ)
-            env["CLAUDE_PROJECT_DIR"] = tmp
-            r = subprocess.run([CHECK_DOCS], cwd=tmp, capture_output=True, text=True, env=env)
-            # check-docs.sh cd's into CLAUDE_PROJECT_DIR and reports paths relative
-            # to it, not absolute.
-            rel_index_path = os.path.join("docs", "harness", "DECISIONS-INDEX.md")
-            if r.returncode != 1:
-                print(f"FAIL - {name}: expected exit 1 on planted phrase, got {r.returncode}\n{r.stdout}\n{r.stderr}")
-                return False
-            if rel_index_path not in r.stdout:
-                print(f"FAIL - {name}: stdout does not name {rel_index_path}")
-                return False
-            if "DEC-01" not in r.stdout:
-                print(f"FAIL - {name}: stdout does not name DEC-01")
-                return False
-
-            # Now mark the same row ok-stale and assert exit 0.
-            marked_row = index_row + " <!-- ok-stale -->"
-            with open(os.path.join(docs_dir, "DECISIONS-INDEX.md"), "w", encoding="utf-8") as f:
-                f.write("<!-- index-contract v1 -->\n\n" + marked_row + "\n")
-            r2 = subprocess.run([CHECK_DOCS], cwd=tmp, capture_output=True, text=True, env=env)
-            if r2.returncode != 0:
-                print(f"FAIL - {name}: expected exit 0 after <!-- ok-stale -->, got {r2.returncode}\n{r2.stdout}\n{r2.stderr}")
-                return False
+        fresh = r.stdout.splitlines()
+        committed = open(REAL_INDEX, encoding="utf-8").read().splitlines()
+        if fresh != committed:
+            only_committed = [l for l in committed if l not in fresh and l.startswith("- DEC-")]
+            only_fresh = [l for l in fresh if l not in committed and l.startswith("- DEC-")]
+            detail = ""
+            if only_committed:
+                detail += f" rows in the file the generator does not produce: {only_committed[:3]}"
+            if only_fresh:
+                detail += f" rows the generator produces that the file lacks: {only_fresh[:3]}"
+            print(f"FAIL - {name}: .harness/harness/docs/DECISIONS-INDEX.md is not what the generator "
+                  f"produces.{detail or ' (difference is outside the DEC rows)'} "
+                  f"Fix: .agents/skills/harness/bin/gen-decisions-index.py")
+            return False
 
         print(f"ok - {name}")
         return True
@@ -432,7 +411,7 @@ def test_committed_index_is_complete_and_within_budget():
             ]
             print(
                 f"FAIL - {name}: {len(unwritten)} row(s) unwritten in {REAL_INDEX} — a decision was "
-                f"appended without its ruling. Run .claude/skills/harness/bin/gen-decisions-index.py "
+                f"appended without its ruling. Run .agents/skills/harness/bin/gen-decisions-index.py "
                 f"and write the ruling after ' :: ' on each listed row, in this commit (REQ-09). "
                 f"Offending: {', '.join(unwritten)}"
             )
@@ -445,26 +424,24 @@ def test_committed_index_is_complete_and_within_budget():
             if not m:
                 continue
             dec_id, ruling = m.groups()
-            stripped = strip_ruling_prose(ruling)
-            non_ws = re.sub(r"\s+", "", stripped)
+            non_ws = re.sub(r"\s+", "", ruling)
             if len(non_ws) < 20:
                 thin.append(dec_id)
-            word_count = len(stripped.split())
+            word_count = len(ruling.split())
             if word_count > 30:
                 over_cap.append((dec_id, word_count))
         if thin or over_cap:
             if thin:
                 print(
                     f"FAIL - {name}: {len(thin)} row(s) below the 20-non-whitespace-character prose "
-                    f"floor after stripping SUPERSEDED/ok-stale clauses: {', '.join(thin)}"
+                    f"floor: {', '.join(thin)}"
                 )
             if over_cap:
                 over_cap.sort(key=lambda pair: pair[1], reverse=True)
                 offenders = ", ".join(f"{dec_id} ({wc})" for dec_id, wc in over_cap)
                 print(
                     f"FAIL - {name}: {len(over_cap)} row(s) in {REAL_INDEX} exceed the 30-word "
-                    f"ruling cap after stripping SUPERSEDED/ok-stale clauses — shorten the ruling "
-                    f"after ' :: ' on each listed row: {offenders}"
+                    f"ruling cap — shorten the ruling after ' :: ' on each listed row: {offenders}"
                 )
             return False
 
@@ -571,22 +548,22 @@ def test_malformed_row_is_reported_not_silently_dropped():
         return False
 
 
-def test_supersession_declared_in_body_prose_is_harvested():
-    """B-3: DEC-120 supersedes DEC-102 in BODY prose, not in its title, so DEC-102's row
-    carried no marker and a reader could act on a dead ruling.
+def test_refs_graph_omits_ids_with_no_live_heading():
+    """CHANGE 2 (FEAT-38 T-06): the refs graph must never name a DEC with no live
+    heading. Standing defect at 7ebfc9e: the generator scraped DEC ids out of
+    prose that merely DESCRIBES a deletion, so a row could cite a DEC with no
+    '## DEC-NNN' heading anywhere in DECISIONS.md.
 
-    The negative half matters as much: a false marker tells a reader to ignore a LIVE
-    decision, so a mid-sentence mention must not mark anything.
+    Both directions are asserted against a SYNTHETIC fixture built here, never
+    the live document: a cited-but-headingless id must be OMITTED from refs,
+    and the same fixture with the heading present must INCLUDE it — a filter
+    that drops everything would pass the first half alone.
     """
-    name = "test_supersession_declared_in_body_prose_is_harvested"
+    name = "test_refs_graph_omits_ids_with_no_live_heading"
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            decisions = [(1, "First"), (2, "Second"), (3, "Third")]
-            bodies = {
-                2: "**Supersedes DEC-1's conclusion** that the old shape was right.",
-                # Narrative, not a declaration: must NOT mark DEC-2.
-                3: "This one supersedes DEC-2 in spirit only, and refines DEC-1.",
-            }
+            decisions = [(1, "First")]
+            bodies = {1: "**Chose:** cites DEC-99, which has no live heading in this fixture."}
             docs_dir = make_authority(tmp, decisions, bodies)
             r = run_gen(tmp)
             if r.returncode != 0:
@@ -594,14 +571,29 @@ def test_supersession_declared_in_body_prose_is_harvested():
                 return False
             rows = {ROW_RE.match(l).group(1): l
                     for l in read_index_rows(docs_dir) if ROW_RE.match(l)}
-            if "SUPERSEDED BY DEC-2" not in rows.get("DEC-1", ""):
-                print(f"FAIL - {name}: DEC-1 lacks its body-declared marker: "
-                      f"{rows.get('DEC-1')}")
+            dec1_left = rows.get("DEC-1", "").split(" :: ", 1)[0]
+            if "DEC-99" in dec1_left:
+                print(f"FAIL - {name}: refs graph names DEC-99 though it has no live "
+                      f"heading: {rows.get('DEC-1')!r}")
                 return False
-            if "SUPERSEDED BY" in rows.get("DEC-2", ""):
-                print(f"FAIL - {name}: DEC-2 was marked from a mid-sentence mention — "
-                      f"a false marker hides a LIVE decision: {rows.get('DEC-2')}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            decisions = [(1, "First"), (99, "Ninety-nine")]
+            bodies = {1: "**Chose:** cites DEC-99, which HAS a live heading in this fixture."}
+            docs_dir = make_authority(tmp, decisions, bodies)
+            r = run_gen(tmp)
+            if r.returncode != 0:
+                print(f"FAIL - {name}: generator exited {r.returncode}: {r.stderr[:200]}")
                 return False
+            rows = {ROW_RE.match(l).group(1): l
+                    for l in read_index_rows(docs_dir) if ROW_RE.match(l)}
+            dec1_left = rows.get("DEC-1", "").split(" :: ", 1)[0]
+            if "DEC-99" not in dec1_left:
+                print(f"FAIL - {name}: refs graph drops DEC-99 though it has a live "
+                      f"heading — a filter that drops everything would also pass the "
+                      f"first half of this test: {rows.get('DEC-1')!r}")
+                return False
+
         print(f"ok - {name}")
         return True
     except Exception as e:
@@ -690,7 +682,7 @@ def test_argv_is_validated_and_only_the_write_path_writes():
         # keyed on a leading `--` never sees it.
         with tempfile.TemporaryDirectory() as tmp:
             path, before = fixture(tmp)
-            r = run_gen(tmp, args=["docs/harness/DECISIONS-INDEX.md"])
+            r = run_gen(tmp, args=[".harness/harness/docs/DECISIONS-INDEX.md"])
             if open(path, encoding="utf-8").read() != before:
                 print(f"FAIL - {name} (b3): a positional argument REWROTE the index")
                 return False
@@ -742,17 +734,153 @@ def test_argv_is_validated_and_only_the_write_path_writes():
         return False
 
 
+def test_root_resolves_through_harness_boundary_not_the_retired_variable():
+    """FEAT-42 T-05: the generator's root comes from `harness_boundary.resolve_root`,
+    never from CLAUDE_PROJECT_DIR or a bare cwd fallback.
+
+    (a) An override that does not carry team-config.yaml (MARKER) must not be silently
+    honoured — the old chain would `os.chdir` straight into it and either crash on a
+    missing DECISIONS.md or, worse, quietly walk back to whatever `os.getcwd()` was.
+    The new resolver discards it LOUDLY on stderr (naming both candidates) rather than
+    chdir-ing into it, and falls back to the real repo root, which does carry MARKER.
+    (b) CLAUDE_PROJECT_DIR alone (the retired name) must NOT redirect the root at all
+    — only HARNESS_PROJECT_DIR does. A tmp dir with no marker, addressed only via
+    CLAUDE_PROJECT_DIR, must fall through to the real derived root rather than error,
+    proving the retired variable is inert.
+    (c) HARNESS_PROJECT_DIR pointing at a directory that DOES carry the marker must be
+    honoured — the generator reads and writes inside that tree, not the real repo.
+    """
+    name = "test_root_resolves_through_harness_boundary_not_the_retired_variable"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # (a) HARNESS_PROJECT_DIR set, no marker -> discarded loudly, falls back to
+            # the real repo root (which carries MARKER), matches the real --stdout output.
+            env = dict(os.environ)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+            env["HARNESS_PROJECT_DIR"] = tmp
+            r = subprocess.run([sys.executable, GEN, "--stdout"], cwd=tmp,
+                                capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                print(f"FAIL - {name} (a): a markerless HARNESS_PROJECT_DIR override "
+                      f"exited {r.returncode}: {r.stderr.strip()[:200]}")
+                return False
+            if "team-config.yaml" not in r.stderr:
+                print(f"FAIL - {name} (a): discarding the markerless override did not "
+                      f"name the missing marker on stderr: {r.stderr.strip()[-300:]!r}")
+                return False
+            real_stdout = subprocess.run([sys.executable, GEN, "--stdout"], cwd=REPO_ROOT,
+                                          capture_output=True, text=True).stdout
+            if r.stdout != real_stdout:
+                print(f"FAIL - {name} (a): fallback root did not produce the real repo's "
+                      f"own output")
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # (b) CLAUDE_PROJECT_DIR alone (retired name) does not redirect the root.
+            docs_dir = os.path.join(tmp, DOCS_DIR)
+            os.makedirs(docs_dir, exist_ok=True)
+            shutil.copy(REAL_DECISIONS, os.path.join(docs_dir, "DECISIONS.md"))
+            env = dict(os.environ)
+            env.pop("HARNESS_PROJECT_DIR", None)
+            env["CLAUDE_PROJECT_DIR"] = tmp
+            r = subprocess.run([sys.executable, GEN, "--stdout"], cwd=tmp,
+                                capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                print(f"FAIL - {name} (b): expected the real repo's DECISIONS.md to be "
+                      f"read (CLAUDE_PROJECT_DIR ignored), generator exited "
+                      f"{r.returncode}: {r.stderr.strip()[:200]}")
+                return False
+            real_stdout = subprocess.run([sys.executable, GEN, "--stdout"], cwd=REPO_ROOT,
+                                          capture_output=True, text=True).stdout
+            if r.stdout != real_stdout:
+                print(f"FAIL - {name} (b): CLAUDE_PROJECT_DIR redirected the root — "
+                      f"output diverged from the real repo's own --stdout")
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # (c) HARNESS_PROJECT_DIR + marker IS honoured.
+            docs_dir = os.path.join(tmp, DOCS_DIR)
+            os.makedirs(docs_dir, exist_ok=True)
+            shutil.copy(REAL_DECISIONS, os.path.join(docs_dir, "DECISIONS.md"))
+            os.makedirs(os.path.join(tmp, ".harness"), exist_ok=True)
+            open(os.path.join(tmp, ".harness", "team-config.yaml"), "w",
+                 encoding="utf-8").write("")
+            env = dict(os.environ)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+            env["HARNESS_PROJECT_DIR"] = tmp
+            r = subprocess.run([sys.executable, GEN, "--stdout"], cwd=tmp,
+                                capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                print(f"FAIL - {name} (c): marker-carrying HARNESS_PROJECT_DIR exited "
+                      f"{r.returncode}: {r.stderr.strip()[:300]}")
+                return False
+            if "- DEC-01 " not in r.stdout:
+                print(f"FAIL - {name} (c): did not regenerate against the tmp tree: "
+                      f"{r.stdout[:200]!r}")
+                return False
+
+        print(f"ok - {name}")
+        return True
+    except Exception as e:
+        print(f"FAIL - {name}: {type(e).__name__}: {e}")
+        return False
+
+
+def test_no_amendment_construct_survives_in_the_authority():
+    """FEAT-38 T-10: the generator's amendment machinery was deleted entirely, so a
+    line in the LIVE authority that starts a new amendment construct would be revived
+    as a live am.N token by nobody — it just gets silently ignored. Guard the authority
+    itself, not the generator, since the generator no longer has any code to police.
+    """
+    name = "test_no_amendment_construct_survives_in_the_authority"
+    try:
+        path = os.path.join(REPO_ROOT, gdi.DECISIONS_PATH)
+        lines = open(path, encoding="utf-8").read().splitlines()
+
+        heading_hits = [
+            n for n, line in enumerate(lines, 1)
+            if re.match(r"^###\s+DEC-[0-9]+\s+amendment", line)
+        ]
+        if heading_hits:
+            print(f"FAIL - {name}: '### DEC-N amendment' heading found at "
+                  f"{path}:{heading_hits}")
+            return False
+
+        bold_hits = [
+            n for n, line in enumerate(lines, 1)
+            if re.match(r"^\*\*Amendment", line)
+        ]
+        if bold_hits:
+            print(f"FAIL - {name}: '**Amendment' line found at {path}:{bold_hits}")
+            return False
+
+        am_dot_hits = [
+            n for n, line in enumerate(lines, 1)
+            if re.search(r"am\.\d", line)
+        ]
+        if am_dot_hits:
+            print(f"FAIL - {name}: 'am.<digit>' token found at {path}:{am_dot_hits}")
+            return False
+
+        print(f"ok - {name}")
+        return True
+    except Exception as e:
+        print(f"FAIL - {name}: {type(e).__name__}: {e}")
+        return False
+
+
 TESTS = [
     test_row_per_distinct_dec_matches_authority,
     test_argv_is_validated_and_only_the_write_path_writes,
     test_malformed_row_is_reported_not_silently_dropped,
-    test_supersession_declared_in_body_prose_is_harvested,
+    test_refs_graph_omits_ids_with_no_live_heading,
     test_preserves_hand_written_rulings_by_dec_number,
-    test_preserves_inline_ok_stale_marker_on_a_row,
-    test_checker_scans_root_level_markdown,
-    test_checker_flags_planted_stale_phrase_in_index,
+    test_strips_inline_ok_stale_marker_on_a_row,
+    test_committed_index_matches_a_fresh_regeneration,
     test_committed_index_is_complete_and_within_budget,
     test_orphaned_ruling_is_reported_not_silently_dropped,
+    test_root_resolves_through_harness_boundary_not_the_retired_variable,
+    test_no_amendment_construct_survives_in_the_authority,
 ]
 
 
